@@ -197,7 +197,6 @@ sample_data/            Six example datasets
 pretrained_models/      Six example pickle models
 tests/                  Hardware-free regression tests
 docs/sdk.md             SDK integration and migration notes (EN / 中文)
-docs/RELEASING.md       Pre-publication checklist
 requirements.txt        Dependencies and pinned official SDK
 ```
 
@@ -227,4 +226,4 @@ Report bugs and propose improvements through [GitHub Issues](https://github.com/
 
 This project's software, documentation, example datasets, and pretrained models are licensed under [MPL-2.0](LICENSE), matching the OpenZilo SDK's software license. Brand and third-party marks belong to their respective owners; the license does not grant trademark rights.
 
-See [NOTICE.md](NOTICE.md) for asset provenance and license scope, and the [publication checklist](docs/RELEASING.md) for release checks.
+See [NOTICE.md](NOTICE.md) for asset provenance and license scope.

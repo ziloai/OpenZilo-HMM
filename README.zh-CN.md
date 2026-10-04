@@ -197,7 +197,6 @@ sample_data/            六种手势的示例数据
 pretrained_models/      六个示例 pickle 模型
 tests/                  无硬件回归测试
 docs/sdk.md             SDK 接入与迁移说明（中英双语）
-docs/RELEASING.md       公开发布前检查清单
 requirements.txt       项目依赖与固定版本的官方 SDK
 ```
 
@@ -227,4 +226,4 @@ python -m unittest discover -s tests -v
 
 本项目的软件、文档、示例数据集和预训练模型采用 [MPL-2.0](LICENSE)，与 OpenZilo SDK 的软件许可证保持一致。品牌和第三方标识归各自权利人所有，许可证不授予商标权。
 
-素材来源与许可范围见 [NOTICE.md](NOTICE.md)，发布核对项见[发布检查清单](docs/RELEASING.md)。
+素材来源与许可范围见 [NOTICE.md](NOTICE.md)。
