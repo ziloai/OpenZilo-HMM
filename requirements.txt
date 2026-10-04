@@ -1,0 +1,6 @@
+numpy>=1.24,<3
+scipy>=1.10,<2
+hmmlearn>=0.3.3,<0.4
+# OpenZilo SDK 0.5.0; pin the upstream revision for reproducible installs.
+# bleak is installed by the SDK. Git is required for this source dependency.
+OpenZilo @ git+https://github.com/ziloai/OpenZilo.git@e9a861dd5c82a154fba0f1bafb628cd04fbd9555
