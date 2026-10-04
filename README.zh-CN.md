@@ -35,10 +35,15 @@ OpenZilo 是面向可穿戴交互与 **ComBodied AI** 的开放开发平台。�
 - 六种手势的示例数据和预训练模型：打响指、甩手、向上、向下、向左、向右。
 - 不依赖硬件的 SDK 接入与离线流程测试。
 
-```text
-OpenZilo 戒指 → OpenZilo SDK → IMU 录制数据 → HMM 训练 → Python 识别
-                                CSV / JSON ↗                ↑
-                                                  实时 BLE 或已录制数据
+```mermaid
+flowchart LR
+    ring["OpenZilo 戒指"] --> sdk["OpenZilo SDK"]
+    sdk --> recordings["IMU 录制数据"]
+    files["CSV / JSON"] --> recordings
+    recordings --> training["HMM 训练"]
+    training -->|训练好的模型| recognition["Python 识别"]
+    sdk -->|实时 BLE| recognition
+    recordings -->|已录制数据| recognition
 ```
 
 ## 开发套件与兼容性

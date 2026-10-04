@@ -35,10 +35,15 @@ OpenZilo is an open development platform for wearable interaction and **ComBodie
 - Six example datasets and pretrained models: finger snap, wrist flick, up, down, left, and right.
 - Hardware-free tests for the SDK integration and offline pipeline.
 
-```text
-OpenZilo ring → OpenZilo SDK → IMU recordings → HMM training → Python recognition
-                                   CSV / JSON ↗                  ↑
-                                                     live BLE or recorded data
+```mermaid
+flowchart LR
+    ring["OpenZilo ring"] --> sdk["OpenZilo SDK"]
+    sdk --> recordings["IMU recordings"]
+    files["CSV / JSON"] --> recordings
+    recordings --> training["HMM training"]
+    training -->|Trained models| recognition["Python recognition"]
+    sdk -->|Live BLE| recognition
+    recordings -->|Recorded data| recognition
 ```
 
 ## Development kits and compatibility
