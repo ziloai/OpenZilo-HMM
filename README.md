@@ -49,14 +49,14 @@ Tkinter comes from your Python/OS installation, not a Python package dependency.
 
 ### Recording, training and export
 
-1. Scan/select the ring or enter its address, then connect. macOS typically uses a UUID. BLE connection and IMU readiness are separate: connecting in recording mode is supported, and values resume once gesture mode starts reporting.
-2. Enter a gesture name. Start a take, perform one gesture, then stop. Record at least two repetitions (five or more recommended), then save. Takes shorter than 12 samples are rejected. Saving an existing name asks to append, requiring the same rate and preserving prior takes.
+1. Scan/select the ring or enter its address, then connect. Successful connections are saved in local device history for selection next time; history can be cleared. macOS typically uses a UUID. BLE connection and IMU readiness are separate: connecting in recording mode is supported, and values resume once gesture mode starts reporting.
+2. Enter a gesture name. Start a take, perform one gesture, then stop. A full-take filtered waveform preview appears, with an optional raw overlay and a repetition selector. Record at least three repetitions for rejection calibration (five to ten or more recommended), then save. Takes shorter than 12 samples are previewed but not retained. Saving an existing name asks to append, requiring the same rate and preserving prior takes.
 3. Select a data directory (default `gestures/`), inspect recording counts/lengths, or import JSON and headerless CSV files. Each CSV is one repetition with six integer columns. Unsaved takes can be undone or cleared; the name is locked while they exist to avoid mixing labels.
-4. Set the sample rate to match the data, then train all datasets. Training runs in the background. Mixed rates are rejected; cutoff frequency must be below half the sample rate. Changing data/settings invalidates the previous training result.
+4. Match the sample rate and choose a preset. For snaps/taps, “应用短促动作 / 响指预设” disables median filtering and uses the same fixed impulse context for training and live inference. Set median points to `1` to disable it; cutoff must be below Nyquist. Background training includes variance regularization and held-out rejection calibration (at least three takes/class). With at least four takes/class, “留出评估” tests held-out recordings without replacing the model. A single label reports positive acceptance rate, not a false-trigger or cross-session accuracy estimate. Retrain after changing settings/data.
 5. Export a **`*.gesture.json`** file containing labels, HMM parameters, preprocessing and segmentation settings. Consumers do not need to reconstruct training settings.
 6. Load an export or use the current model for live testing with a matching-rate ring. Begin at rest to establish a baseline and return to rest between gestures.
 
-The live chart tab shows acceleration and gyroscope traces with freeze/clear controls; freezing the display does not pause capture. There is one IMU consumer, with idle batches discarded between takes. Mode-related pauses retain BLE and retry IMU reporting when gesture mode returns; real link loss triggers reconnect with backoff. Gaps cancel unfinished takes but preserve completed ones. Manual disconnect stops retries, and shutdown cleans up reports and the link. Studio does not change device modes or hardware sample rates.
+The live chart tab shows acceleration and gyroscope traces. Recognized segments are outlined in purple, aligned to sample indices and labelled with the gesture name. Freeze/clear controls affect the traces and boxes, not capture. There is one IMU consumer, with idle batches discarded between takes. Mode-related pauses retain BLE and retry IMU reporting when gesture mode returns; real link loss triggers reconnect with backoff. Gaps cancel unfinished takes but preserve completed ones. Manual disconnect stops retries, and shutdown cleans up reports and the link. Studio does not change device modes or hardware sample rates.
 
 BLE requires an adapter and permissions (BlueZ on Linux, terminal/IDE Bluetooth permission on macOS). Gesture features do not need `ffmpeg`; decoding ring recordings into WAV requires a system `ffmpeg` installation, with raw `.bin` preserved if decoding is unavailable. Integration targets SDK **0.5.0**, protocol **v4**, and upstream firmware documentation baseline **`V2.000.0001.0015`**; verify your hardware/firmware. The exact SDK commit is pinned in [`studio/pyproject.toml`](studio/pyproject.toml).
 
@@ -64,7 +64,7 @@ BLE requires an adapter and permissions (BlueZ on Linux, terminal/IDE Bluetooth 
 
 In the recording tab, select an output directory and enable automatic reception. Put the ring in recording mode, **hold its physical button to record, then release to push the file**. Studio saves the raw `.bin` and, when ffmpeg is installed, a playable WAV. Missed recordings can be listed and downloaded by index; device files are never automatically deleted.
 
-The SDK has **no host-side start/stop recording command**. GUI controls only arm/stop reception or downloading, not the ring microphone. Audio operations pause IMU requests; stop reception before returning to gesture testing. Interrupted transfers require a fresh download, and transfer progress is not a live recording timer. See the [Studio guide](studio/README.md).
+The SDK has **no host-side start/stop recording command**. GUI controls only arm/stop reception or downloading, not the ring microphone. Idle automatic listening does not block IMU. Only actual file transfers/queries pause IMU requests; probing resumes afterwards without stopping the listener. Previously enabled live recognition resumes when gesture-mode data returns. Interrupted transfers require a fresh download, and transfer progress is not a live recording timer. See the [Studio guide](studio/README.md).
 
 ## Try without hardware
 
@@ -116,14 +116,15 @@ for result in recognizer.feed(batch, sample_rate_hz=25):
 recognizer.reset()  # Reset stream state and baseline on reconnect/repositioning.
 ```
 
-`feed()` returns **all** completed predictions in a batch, not just the last. `predict()` does not segment and returns `None` for fewer than two feature windows. Exports use versioned JSON numeric parameters, never pickle deserialization. See [architecture and format](docs/architecture.md).
+`feed()` returns **all** accepted completed predictions in a batch. `predict()` treats motion-mode recordings as whole segments; impulse mode requires exactly one complete detected context, using the same crop as training/streaming. Too-short or rejected input returns `None`. Exports use versioned JSON numeric parameters, never pickle deserialization. See [architecture and format](docs/architecture.md).
 
 ### Data and recognition limits
 
 - Axis order is **`ax, ay, az, gx, gy, gz`**, in raw signed int16 units, not g or degrees/second. Shape, finiteness and range are checked.
 - Passing `sample_rate_hz` checks consistency; it does not configure hardware or resample. Keep orientation, units and sensor ranges consistent with training.
-- Segmentation uses motion relative to an idle baseline: default threshold 1500, minimum 12 samples, maximum 125. Overlong movements are discarded; incomplete gestures are not flushed at end of input.
-- Confidence is a relative likelihood-gap heuristic, **not a calibrated probability or reliable unknown-gesture detector**. A single model has fixed confidence 0.8.
+- Legacy/default API segmentation uses an idle baseline (threshold 1500, minimum 12 frames, maximum 125). New Studio presets convert durations to the actual rate. Impulse mode uses raw acceleration differences with 0.12 s pre-context and 0.28 s post-context; incomplete events are not flushed.
+- Confidence is a relative likelihood-gap heuristic, **not a probability**. Single-label predictions have `confidence=None`, not a fabricated 0.8. An uncalibrated single-label bundle raises on nonempty `feed()`; retrain with rejection calibration (at least three recordings).
+- New filter/segmentation/rejection settings use v2 exports; v1 remains readable with original preprocessing and offline scores. Positive-only score, strength and length limits cannot guarantee reliable unknown rejection. Test ordinary movements/negative examples and independent sessions.
 - Recognizers maintain one stream's state and are not intended to be shared between threads/devices. Evaluate with independent recordings.
 
 ## Existing command-line compatibility

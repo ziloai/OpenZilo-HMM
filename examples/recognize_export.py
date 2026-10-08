@@ -27,7 +27,8 @@ def main() -> None:
             if prediction is None:
                 print(f"{index}: no prediction (too short or rejected)")
             else:
-                print(f"{index}: {prediction.name}  confidence={prediction.confidence:.3f} "
+                confidence = "n/a (single label)" if prediction.confidence is None else f"{prediction.confidence:.3f}"
+                print(f"{index}: {prediction.name}  confidence={confidence} "
                       f"score/frame={prediction.score:.3f}")
     except (ValueError, OSError, KeyError, TypeError) as exc:
         parser.exit(1, f"Error: {exc}\n")

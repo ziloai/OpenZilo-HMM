@@ -2,7 +2,7 @@
 """Public inference API: no GUI, BLE SDK, or training-platform imports."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 import math
 
@@ -10,22 +10,27 @@ import numpy as np
 
 from .bundle import GestureBundle
 from .preprocessing import make_pipeline, validate_samples
-from .segmentation import MotionSegmenter
+from .segmentation import MotionSegmenter, impulse_peak, prepare_recording
 
 
 @dataclass(frozen=True)
 class Prediction:
     name: str
-    confidence: float
+    confidence: float | None  # No comparative confidence exists with only one label.
     score: float
     scores: dict[str, float]
+    # Half-open indices in the feed() stream since reset(); None for predict().
+    start_sample: int | None = None
+    end_sample: int | None = None
 
 
 class GestureRecognizer:
     """Classify recorded segments or consume continuous raw six-axis batches.
 
     Confidence is a relative score-gap heuristic, NOT a calibrated probability
-    or unknown-gesture detector. With one model it is fixed at 0.8.
+    or unknown-gesture detector. With one model it is None, never a fixed 0.8.
+    Calibrated bundles additionally reject implausible scores/strengths/lengths.
+    A single uncalibrated model cannot be used for automatic stream detection.
     Instances maintain stream state and should not be shared across threads.
     """
     def __init__(self, bundle: GestureBundle, min_confidence: float = 0.0):
@@ -48,6 +53,10 @@ class GestureRecognizer:
     def sample_rate_hz(self) -> float:
         return self.bundle.pipeline.sample_rate_hz
 
+    @property
+    def has_rejection(self) -> bool:
+        return self.bundle.rejection is not None
+
     def reset(self) -> None:
         """Reset stream state and baseline, e.g. after disconnect/reconnect."""
         self.segmenter.reset()
@@ -62,6 +71,12 @@ class GestureRecognizer:
         data = validate_samples(samples, allow_empty=True)
         if len(data) < self.bundle.pipeline.min_samples:
             return None
+        data = prepare_recording(data, self.bundle.segmentation)
+        return self._predict_segment(data) if data is not None else None
+
+    def _predict_segment(self, data: np.ndarray) -> Prediction | None:
+        if len(data) < self.bundle.pipeline.min_samples:
+            return None
         features = self.extractor.extract(self.filter.apply(data))
         scores = {}
         for name, model in self.bundle.models.items():
@@ -72,11 +87,18 @@ class GestureRecognizer:
             return None
         ranked = sorted(scores, key=scores.get, reverse=True)
         best = ranked[0]
-        confidence = 0.8 if len(ranked) == 1 else float(-np.expm1(-(scores[best] - scores[ranked[1]]) / 10.0))
-        if confidence < self.min_confidence:
-            return None
         # Scores are per feature frame for comparability across segment lengths.
         normalized = {name: score / len(features) for name, score in scores.items()}
+        if self.bundle.rejection is not None:
+            limits = self.bundle.rejection[best]
+            if (not limits.min_samples <= len(data) <= limits.max_samples
+                    or normalized[best] < limits.score_floor
+                    or impulse_peak(data) < limits.peak_floor):
+                return None
+        confidence = None if len(ranked) == 1 else float(-np.expm1(-(scores[best] - scores[ranked[1]]) / 10.0))
+        if ((confidence is None and self.min_confidence > 0)
+                or (confidence is not None and confidence < self.min_confidence)):
+            return None
         return Prediction(best, confidence, normalized[best], normalized)
 
     def feed(self, samples: object, *, sample_rate_hz: float | None = None) -> list[Prediction]:
@@ -86,9 +108,15 @@ class GestureRecognizer:
         trailing rest ends a gesture; incomplete segments are not auto-flushed.
         """
         self._check_rate(sample_rate_hz)
+        data = validate_samples(samples, allow_empty=True)
+        if not len(data):
+            return []
+        if len(self.bundle.models) == 1 and not self.has_rejection:
+            raise ValueError("单类模型缺少拒识标定，无法区分普通运动；请用至少 3 次录制重新训练并开启拒识标定")
         results = []
-        for segment in self.segmenter.feed_all(samples):
-            prediction = self.predict(segment)
+        for segment in self.segmenter.feed_segments(data):
+            prediction = self._predict_segment(segment.samples)
             if prediction is not None:
-                results.append(prediction)
+                results.append(replace(prediction, start_sample=segment.start_sample,
+                                       end_sample=segment.end_sample))
         return results

@@ -33,6 +33,7 @@ class Studio:
         from .datasets import GestureDataset, load_dataset, save_dataset, dataset_path
         from .training import train_datasets
         from .device import RingWorker
+        from .device_history import DeviceHistory
 
         self.root = root
         self.events = queue.Queue()
@@ -42,6 +43,12 @@ class Studio:
         self.records = {}
         self.invalid_files = []
         self.devices = {}
+        self.scanned_devices = []
+        self.device_history = DeviceHistory()
+        self.preview_repetitions = []
+        self.preview_rate = None
+        self.preview_is_pending = False
+        self.recognition_origin = 0
         self.pending = []
         self.take = None
         self.take_rate = None
@@ -62,19 +69,24 @@ class Studio:
         self.origin = None
         self.stale = False
         self.revision = 0
+        self.evaluation_revision = None
         self.locked = []
         self.root.title("OpenZilo 手势与录音工作室")
         self.root.geometry("1060x860")
         self.root.minsize(980, 760)
         self._build()
+        self.refresh_device_choices()
+        if self.device_history.warning:
+            self.log(self.device_history.warning)
         self.set_audio_state({"state": "idle", "message": "未开启接收"})
         self.worker.start()
         self.refresh()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(50, self.poll)
-        self.log("手势模式：每次只录制一个完整动作；每个手势至少两次有效重复。")
+        self.log("每次只录制一个完整动作；拒识标定每类至少 3 次，留出评估至少 4 次，建议采集更多变化。")
         self.log("原始六轴顺序：ax, ay, az, gx, gy, gz（设备原始整数，不转换单位）。")
-        self.log("置信度是模型比较指标，不是概率；训练、录制和识别必须使用相同采样率。")
+        self.log("响指/敲击请先应用短促动作预设；单类不显示虚构置信度，正样本标定仍不能保证消除误触。")
+        self.log("训练、录制和识别必须使用相同采样率。")
         self.log("实时曲线页可暂停显示；录音页先开启接收，再在戒指上长按录音、松开推送。")
 
     def _build(self):
@@ -84,16 +96,53 @@ class Studio:
         body.rowconfigure(1, weight=1)
         self.tabs = ttk.Notebook(body)
         self.tabs.grid(row=1, column=0, sticky="nsew", pady=5)
-        gesture = ttk.Frame(self.tabs, padding=6)
+        self.gesture_tab = ttk.Frame(self.tabs)
+        # The controls must remain reachable on smaller desktop displays.
+        gesture_canvas = tk.Canvas(self.gesture_tab, highlightthickness=0)
+        gesture_scroll = ttk.Scrollbar(self.gesture_tab, orient="vertical", command=gesture_canvas.yview)
+        gesture_scroll.pack(side="right", fill="y")
+        gesture_canvas.pack(side="left", fill="both", expand=True)
+        gesture_canvas.configure(yscrollcommand=gesture_scroll.set)
+        gesture = ttk.Frame(gesture_canvas, padding=6)
         gesture.columnconfigure(0, weight=1)
+        content = gesture_canvas.create_window(0, 0, window=gesture, anchor="nw")
+        gesture.bind("<Configure>", lambda event: gesture_canvas.configure(scrollregion=gesture_canvas.bbox("all")))
+        gesture_canvas.bind("<Configure>", lambda event: gesture_canvas.itemconfigure(content, width=event.width))
+
+        def scroll_gesture(event):
+            if not (str(event.widget).startswith(str(gesture)) or event.widget is gesture_canvas):
+                return
+            if gesture_canvas.yview() == (0.0, 1.0):
+                return
+            if getattr(event, "num", None) in (4, 5):
+                steps = -1 if event.num == 4 else 1
+            else:
+                steps = -int(event.delta if sys.platform == "darwin" else event.delta / 120)
+            if steps:
+                gesture_canvas.yview_scroll(steps, "units")
+                return "break"
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.bind(sequence, scroll_gesture, add="+")
         chart = ttk.Frame(self.tabs, padding=6)
         audio = ttk.Frame(self.tabs, padding=6)
-        self.tabs.add(gesture, text="手势录制与训练")
+        self.tabs.add(self.gesture_tab, text="手势录制与训练")
         self.tabs.add(chart, text="实时六轴曲线")
+        self.preview_tab = ttk.Frame(self.tabs, padding=6)
+        self.tabs.add(self.preview_tab, text="录制波形（滤波后）")
         self.tabs.add(audio, text="戒指录音")
-        from .plotting import IMUPlot
+        from .plotting import IMUPlot, RecordingPlot
         self.plot = IMUPlot(chart)
         self.plot.widget.pack(fill="both", expand=True)
+        preview_controls = ttk.Frame(self.preview_tab)
+        preview_controls.pack(fill="x", pady=5)
+        self.preview_title = tk.StringVar(value="尚无录制")
+        ttk.Label(preview_controls, textvariable=self.preview_title).pack(side="left")
+        self.preview_choice = ttk.Combobox(preview_controls, state="readonly", width=25)
+        self.preview_choice.pack(side="left", padx=8)
+        self.preview_choice.bind("<<ComboboxSelected>>", self.show_preview)
+        self.button(preview_controls, "返回录制 / 训练", lambda: self.tabs.select(self.gesture_tab)).pack(side="right")
+        self.preview_plot = RecordingPlot(self.preview_tab)
+        self.preview_plot.widget.pack(fill="both", expand=True)
         self._build_audio(audio)
         work = ttk.Frame(gesture)
         work.grid(row=0, column=0, sticky="ew")
@@ -104,14 +153,16 @@ class Studio:
         device = ttk.LabelFrame(body, text="设备连接（切换模式不会主动断开 BLE）", padding=6)
         device.grid(row=0, column=0, sticky="ew", pady=5)
         self.button(device, "扫描", lambda: self.request(self.worker.scan)).grid(row=0, column=0)
-        self.device_choice = ttk.Combobox(device, state="readonly", width=32)
-        self.device_choice.grid(row=0, column=1, padx=5)
+        device.columnconfigure(1, weight=1)
+        self.device_choice = ttk.Combobox(device, state="readonly", width=24)
+        self.device_choice.grid(row=0, column=1, padx=5, sticky="ew")
         self.device_choice.bind("<<ComboboxSelected>>", self.select_device)
         self.address = tk.StringVar()
-        ttk.Entry(device, textvariable=self.address, width=30).grid(row=0, column=2)
+        ttk.Entry(device, textvariable=self.address, width=24).grid(row=0, column=2)
         self.connect_button = self.button(device, "连接", self.connect)
         self.connect_button.grid(row=0, column=3, padx=5)
         self.button(device, "断开 / 取消连接", self.disconnect).grid(row=0, column=4)
+        self.button(device, "清空设备历史", self.clear_device_history).grid(row=0, column=5, padx=5)
         self.status = tk.StringVar(value="未连接；可扫描或直接输入地址")
         ttk.Label(device, textvariable=self.status).grid(row=1, column=0, columnspan=5, sticky="w")
         self.raw = tk.StringVar(value="ax / ay / az / gx / gy / gz：—；样本数：0")
@@ -146,6 +197,7 @@ class Studio:
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width)
         self.tree.grid(row=0, column=0, sticky="ew")
+        self.tree.bind("<<TreeviewSelect>>", self.preview_dataset)
         scroll = ttk.Scrollbar(data, orient="vertical", command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scroll.set)
@@ -162,7 +214,8 @@ class Studio:
         definitions = [("n_states", "状态数", "6"), ("cutoff_hz", "低通 Hz", "10"),
                        ("window_size", "窗口", "8"), ("window_overlap", "重叠", "4"),
                        ("sample_rate_hz", "采样率 Hz", "25"),
-                       ("energy_threshold", "能量阈值", "1500")]
+                       ("energy_threshold", "触发阈值", "1500"),
+                       ("median_kernel", "中值点数(1关)", "5")]
         fields = ttk.Frame(model)
         fields.pack(fill="x")
         for col, (key, label, default) in enumerate(definitions):
@@ -174,10 +227,19 @@ class Studio:
             entry.pack()
             self.params[key] = var
             self.locked.append(entry)
-            var.trace_add("write", lambda *_: self.invalidate("训练参数已改变"))
+            var.trace_add("write", self.parameters_changed)
+        self.params["segmentation_mode"] = tk.StringVar(value="motion")
+        self.params["segmentation_mode"].trace_add("write", self.parameters_changed)
+        presets = ttk.Frame(model)
+        presets.pack(fill="x", pady=4)
+        self.button(presets, "应用短促动作 / 响指预设", lambda: self.apply_preset("impulse"), lock=True).pack(side="left")
+        self.button(presets, "应用连续动作预设", lambda: self.apply_preset("motion"), lock=True).pack(side="left", padx=5)
+        self.mode_text = tk.StringVar(value="当前分段：连续动作（帧数按采样率换算）")
+        ttk.Label(model, textvariable=self.mode_text, wraplength=880).pack(anchor="w")
         model_actions = ttk.Frame(model)
         model_actions.pack(fill="x", pady=5)
         self.button(model_actions, "训练全部数据", self.train, lock=True).pack(side="left")
+        self.button(model_actions, "留出评估", self.evaluate, lock=True).pack(side="left", padx=5)
         self.button(model_actions, "加载模型包", self.load_bundle, lock=True).pack(side="left", padx=5)
         self.export_button = self.button(model_actions, "导出模型包", self.export_bundle)
         self.export_button.pack(side="left")
@@ -189,6 +251,8 @@ class Studio:
         ttk.Label(model, textvariable=self.model_text, wraplength=940).pack(anchor="w")
         self.result = tk.StringVar(value="识别结果：—")
         ttk.Label(model, textvariable=self.result).pack(anchor="w")
+        self.evaluation_text = tk.StringVar(value="拒识标定训练至少 3 次；留出评估至少 4 次。单类只能评估正样本通过率，不能测误触率。")
+        ttk.Label(model, textvariable=self.evaluation_text, wraplength=900).pack(anchor="w")
 
         logs = ttk.LabelFrame(body, text="日志", padding=4)
         logs.grid(row=2, column=0, sticky="nsew", pady=5)
@@ -202,7 +266,7 @@ class Studio:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(4, weight=1)
         ttk.Label(parent, text="先开启接收，再将戒指切到录音模式：长按戒指按键录音，松开后自动推送文件。\n"
-                  "SDK 不支持电脑开始/停止录音；本页只控制接收/下载。接收期间暂停 IMU，停止接收后自动恢复探测。\n"
+                  "SDK 不支持电脑开始/停止录音；待机监听不阻塞手势，仅传输时暂停 IMU，切回手势模式自动恢复。\n"
                   "原始 .bin 始终保留；安装 ffmpeg 后同时转为可播放 WAV。若漏收或中断，可从历史录音重新下载。",
                   wraplength=900).grid(row=0, column=0, sticky="w", pady=8)
         directory = ttk.Frame(parent)
@@ -257,8 +321,7 @@ class Studio:
         if self.take is not None:
             self.error("请先停止本次手势录制，再开启录音接收。")
             return
-        self.stop_live()
-        self.set_audio_state({"state": "starting", "message": "正在暂停 IMU 并开启接收…"})
+        self.set_audio_state({"state": "starting", "message": "正在开启自动监听（不占用手势采集）…"})
         if not self.request(lambda: self.worker.start_audio(self.audio_directory)):
             self.set_audio_state({"state": "idle", "message": "开启接收失败"})
 
@@ -298,6 +361,8 @@ class Studio:
         self.audio_dir_button.configure(state="normal" if idle else "disabled")
         self.audio_list_button.configure(state="normal" if idle and self.connected else "disabled")
         self.audio_download_button.configure(state="normal" if idle and self.connected and self.remote_audio_files else "disabled")
+        if self.audio_state in {"idle", "listening"} and self.imu_active and self.live.get() and self.recognizer is None:
+            self.toggle_live()
 
     def open_path(self, path):
         try:
@@ -344,12 +409,108 @@ class Studio:
 
     def invalidate(self, reason):
         self.revision += 1
+        if self.evaluation_revision is not None:
+            self.evaluation_text.set("数据或参数已改变；请重新进行留出评估。")
+            self.evaluation_revision = None
         if self.bundle is not None and self.origin == "trained" and not self.stale:
             self.stale = True
             self.stop_live()
             self.export_button.configure(state="disabled")
             self.model_text.set(f"{reason}；旧模型已失效，请重新训练。")
             self.log(f"{reason}；旧模型不可导出或试识别。")
+
+    def pipeline_settings(self, sample_rate=None):
+        return PipelineConfig(
+            sample_rate_hz=float(self.params["sample_rate_hz"].get()) if sample_rate is None else sample_rate,
+            cutoff_hz=float(self.params["cutoff_hz"].get()),
+            median_kernel=int(self.params["median_kernel"].get()),
+            window_size=int(self.params["window_size"].get()),
+            window_overlap=int(self.params["window_overlap"].get()),
+            filter_initialization="steady",
+        )
+
+    def segmentation_settings(self, pipeline):
+        return SegmentationConfig.for_sample_rate(
+            pipeline.sample_rate_hz, mode=self.params["segmentation_mode"].get(),
+            energy_threshold=float(self.params["energy_threshold"].get()), min_samples=pipeline.min_samples,
+        )
+
+    def apply_preset(self, mode):
+        try:
+            rates = {dataset.sample_rate_hz for _, dataset in self.records.values()}
+            rate = (self.actual_rate or self.preview_rate or
+                    (next(iter(rates)) if len(rates) == 1 else float(self.params["sample_rate_hz"].get())))
+            # Validate before writing anything to the fields.
+            PipelineConfig(sample_rate_hz=rate, cutoff_hz=min(40.0, 0.3 * rate))
+            window = max(4, round(rate * (0.08 if mode == "impulse" else 0.32)))
+            values = dict(sample_rate_hz=f"{rate:g}",
+                          cutoff_hz=f"{min(40.0, rate * 0.3) if mode == 'impulse' else min(10.0, rate * 0.4):g}",
+                          median_kernel="1" if mode == "impulse" else "5",
+                          window_size=str(window), window_overlap=str(window // 2),
+                          energy_threshold="8000" if mode == "impulse" else "1500",
+                          segmentation_mode=mode)
+            self._setting_preset = True
+            try:
+                for key, value in values.items():
+                    self.params[key].set(value)
+            finally:
+                self._setting_preset = False
+            self.parameters_changed()
+            self.log("已应用预设；请重新训练。原始录制不变，短促模式只使用冲击前后窗口。")
+        except (ValueError, TypeError) as exc:
+            self.error(str(exc))
+
+    def parameters_changed(self, *_):
+        if getattr(self, "_setting_preset", False):
+            return
+        self.invalidate("训练参数已改变")
+        try:
+            pipeline = self.pipeline_settings()
+            config = self.segmentation_settings(pipeline)
+            if config.mode == "impulse":
+                self.mode_text.set(f"短促动作：加速度相邻差触发，前 {config.pre_roll / pipeline.sample_rate_hz:.2f}s "
+                                   f"+ 后 {config.post_roll / pipeline.sample_rate_hz:.2f}s；每次需包含一个完整冲击；训练自动裁剪")
+            else:
+                self.mode_text.set(f"连续动作：结束静止 {config.min_offset_frames / pipeline.sample_rate_hz:.2f}s，"
+                                   f"最长 {config.max_gesture_len / pipeline.sample_rate_hz:.1f}s（按采样率换算）")
+        except (ValueError, TypeError):
+            self.mode_text.set("参数尚未完整或无效；请检查采样率、低通、中值窗口和触发阈值。")
+        self.show_preview()
+
+    def preview_recordings(self, repetitions, rate, title, *, pending=False, reveal=False):
+        self.preview_repetitions = list(repetitions)
+        self.preview_rate = rate
+        self.preview_is_pending = pending
+        self.preview_title.set(title)
+        choices = [f"第 {i + 1} 次 · {len(rep)} 样本" for i, rep in enumerate(repetitions)]
+        self.preview_choice.configure(values=choices)
+        if choices:
+            self.preview_choice.current(len(choices) - 1)
+        else:
+            self.preview_choice.set("")
+        self.show_preview()
+        if reveal:
+            self.tabs.select(self.preview_tab)
+
+    def show_preview(self, _event=None):
+        index = self.preview_choice.current()
+        if not self.preview_repetitions or not 0 <= index < len(self.preview_repetitions):
+            self.preview_plot.clear()
+            return
+        try:
+            # Use the recording's actual rate, not a potentially different training rate.
+            pipeline = self.pipeline_settings(self.preview_rate)
+            self.preview_plot.show_recording(self.preview_repetitions[index], pipeline,
+                                             segmentation=self.segmentation_settings(pipeline))
+        except (ValueError, TypeError) as exc:
+            self.preview_plot.clear(f"无法预览，请检查滤波参数：{exc}")
+
+    def preview_dataset(self, _event=None):
+        selected = self.tree.selection()
+        if selected and selected[0] in self.records:
+            dataset = self.records[selected[0]][1]
+            self.preview_recordings(dataset.repetitions, dataset.sample_rate_hz,
+                                    f"已保存：{dataset.name}")
 
     def update_takes(self):
         lengths = [len(rep) for rep in self.pending]
@@ -369,6 +530,8 @@ class Studio:
         self.pending.clear()
         self.pending_rate = None
         self.update_takes()
+        if self.preview_is_pending:
+            self.preview_recordings([], None, "暂无未保存录制")
 
     def discard_takes(self):
         if self.confirm_discard():
@@ -409,6 +572,51 @@ class Studio:
                     self.invalid_files.append(path.name)
                     self.log(f"无效数据 {path.name}：{exc}；修正或移出目录后才能训练。")
         except Exception as exc:
+            self.error(str(exc))
+
+    def refresh_device_choices(self):
+        scanned = {d["address"].casefold(): d for d in self.scanned_devices}
+        entries = []
+        seen = set()
+        for entry in self.device_history.entries:
+            key = entry["address"].casefold()
+            scan = scanned.get(key, {})
+            name = scan.get("name") or entry["name"] or "未命名"
+            entries.append((f"历史 · {name} | {entry['address']}", entry["address"]))
+            seen.add(key)
+        for entry in self.scanned_devices:
+            if entry["address"].casefold() not in seen:
+                entries.append((f"{entry.get('name') or '未命名'} | {entry['address']} | RSSI {entry.get('rssi', '—')}", entry["address"]))
+                seen.add(entry["address"].casefold())
+        self.devices = dict(entries)
+        self.device_choice.configure(values=list(self.devices))
+        address = self.address.get().strip()
+        selected = next((label for label, value in entries if value.casefold() == address.casefold()), "")
+        if not address and entries:
+            selected, address = entries[0]
+            self.address.set(address)
+        self.device_choice.set(selected)
+
+    def remember_device(self, payload):
+        address = payload["address"]
+        name = next((d.get("name") for d in self.scanned_devices
+                     if d["address"].casefold() == address.casefold()), None)
+        if not name and not any(e["address"].casefold() == address.casefold() for e in self.device_history.entries):
+            name = payload.get("model", "")
+        try:
+            self.device_history.remember(address, name or "")
+        except (OSError, ValueError) as exc:
+            self.log(f"设备已连接，但无法保存历史：{exc}")
+        self.address.set(address)
+        self.refresh_device_choices()
+
+    def clear_device_history(self):
+        if not messagebox.askyesno("清空设备历史？", "仅删除本机保存的设备历史，不会断开当前设备。", parent=self.root):
+            return
+        try:
+            self.device_history.clear()
+            self.refresh_device_choices()
+        except OSError as exc:
             self.error(str(exc))
 
     def select_device(self, _event):
@@ -454,16 +662,20 @@ class Studio:
             self.take = None
             if len(samples) < 12:
                 self.log(f"本次仅 {len(samples)} 个样本，少于 12，已拒绝。")
+                if samples:
+                    self.preview_recordings([samples], self.take_rate, "本次过短（未保留）", pending=True, reveal=True)
             else:
                 try:
                     dataset = GestureDataset(self.name.get().strip(), [np.asarray(samples)], self.take_rate)
                     self.pending.extend(dataset.repetitions)
                     self.pending_rate = self.take_rate
+                    self.preview_recordings(self.pending, self.pending_rate,
+                                            f"未保存：{dataset.name}", pending=True, reveal=True)
                 except Exception as exc:
                     self.error(str(exc))
             self.update_takes()
             return
-        if not self.connected or not self.imu_active or self.audio_state != "idle" or not self.name.get().strip():
+        if not self.connected or not self.imu_active or self.audio_state not in {"idle", "listening"} or not self.name.get().strip():
             self.error("请输入手势名称，等待 IMU 恢复上报；录音期间不能录制手势。")
             return
         if self.pending and not self.same_rate(self.pending_rate, self.actual_rate):
@@ -479,6 +691,7 @@ class Studio:
         elif self.pending:
             self.pending.pop()
             self.update_takes()
+            self.preview_recordings(self.pending, self.pending_rate, f"未保存：{self.name.get()}", pending=True)
 
     @staticmethod
     def same_rate(a, b):
@@ -512,6 +725,7 @@ class Studio:
         try:
             dataset = GestureDataset(self.name.get().strip(), list(self.pending), self.pending_rate)
             if self.persist(dataset, minimum=2):
+                self.preview_recordings(dataset.repetitions, dataset.sample_rate_hz, f"刚保存：{dataset.name}")
                 self.clear_takes()
         except Exception as exc:
             self.error(str(exc))
@@ -559,12 +773,9 @@ class Studio:
             datasets = [record[1] for record in self.records.values()]
             if not datasets:
                 raise ValueError("当前目录没有有效数据。")
-            params = {key: var.get() for key, var in self.params.items()}
-            pipeline = PipelineConfig(sample_rate_hz=float(params["sample_rate_hz"]),
-                cutoff_hz=float(params["cutoff_hz"]), window_size=int(params["window_size"]),
-                window_overlap=int(params["window_overlap"]))
-            segmentation = SegmentationConfig(energy_threshold=float(params["energy_threshold"]))
-            n_states = int(params["n_states"])
+            pipeline = self.pipeline_settings()
+            segmentation = self.segmentation_settings(pipeline)
+            n_states = int(self.params["n_states"].get())
             if n_states < 1:
                 raise ValueError("状态数必须为正整数。")
         except Exception as exc:
@@ -586,10 +797,49 @@ class Studio:
         def run():
             try:
                 bundle = train_datasets(datasets, pipeline, n_states=n_states,
-                    segmentation=segmentation, progress=lambda text: self.events.put(("progress", text)))
+                    segmentation=segmentation, calibrate_rejection=True,
+                    progress=lambda text: self.events.put(("progress", text)))
                 self.events.put(("trained", (bundle, summary, revision)))
             except Exception as exc:
                 self.events.put(("train_failed", str(exc)))
+        self.executor.submit(run)
+
+    def evaluate(self):
+        if self.training:
+            return
+        if self.take is not None:
+            self.error("请先停止本次录制；评估只使用已保存数据。")
+            return
+        if self.pending and not messagebox.askyesno("仍有未保存录制", "评估只使用已保存数据。继续？", parent=self.root):
+            return
+        try:
+            from .evaluation import evaluate_leave_one_out
+            # Do not refresh/invalidate the current model for a read-only evaluation.
+            datasets = [load_dataset(path) for path in sorted(self.directory.glob("*.json"))]
+            if not datasets:
+                raise ValueError("当前目录没有评估数据。")
+            pipeline = self.pipeline_settings()
+            segmentation = self.segmentation_settings(pipeline)
+            n_states = int(self.params["n_states"].get())
+        except Exception as exc:
+            self.error(str(exc))
+            return
+        self.stop_live()
+        self.training = True
+        for widget in self.locked:
+            widget.configure(state="disabled")
+        self.export_button.configure(state="disabled")
+        self.evaluation_text.set("正在后台逐次留出评估；不会替换当前模型…")
+        revision = self.revision
+
+        def run():
+            try:
+                result = evaluate_leave_one_out(datasets, pipeline, n_states,
+                    segmentation=segmentation, calibrate_rejection=True,
+                    progress=lambda text: self.events.put(("progress", text)))
+                self.events.put(("evaluated", (result, revision)))
+            except Exception as exc:
+                self.events.put(("evaluation_failed", str(exc)))
         self.executor.submit(run)
 
     def finish_training(self):
@@ -604,7 +854,10 @@ class Studio:
         self.bundle = bundle
         self.origin = origin
         self.stale = False
-        self.model_text.set(f"{summary}；手势：{', '.join(bundle.gesture_names)}；{bundle.pipeline.sample_rate_hz:g} Hz")
+        mode = "短促动作" if bundle.segmentation.mode == "impulse" else "连续动作"
+        rejection = "带拒识标定（非概率）" if bundle.rejection else "无拒识标定；单类不能开启自动识别，请重新训练"
+        self.model_text.set(f"{summary}；手势：{', '.join(bundle.gesture_names)}；{bundle.pipeline.sample_rate_hz:g} Hz；"
+                            f"{mode}，中值 {bundle.pipeline.median_kernel} / 低通 {bundle.pipeline.cutoff_hz:g} Hz；{rejection}")
         self.export_button.configure(state="normal")
         self.log(self.model_text.get())
 
@@ -642,12 +895,17 @@ class Studio:
         try:
             if self.training or self.bundle is None or self.stale:
                 raise ValueError("请先训练有效模型或加载模型包。")
-            if not self.connected or not self.imu_active or self.audio_state != "idle":
+            if not self.connected or not self.imu_active or self.audio_state not in {"idle", "listening"}:
                 raise ValueError("请先连接设备并等待 IMU 恢复上报；录音期间不能试识别。")
             if not self.same_rate(self.actual_rate, self.bundle.pipeline.sample_rate_hz):
                 raise ValueError(f"采样率不匹配：设备 {self.actual_rate:g} Hz，模型 {self.bundle.pipeline.sample_rate_hz:g} Hz。")
             self.recognizer = GestureRecognizer(self.bundle)
-            self.log("实时试识别已开启；置信度非概率。")
+            if len(self.bundle.gesture_names) == 1 and not self.recognizer.has_rejection:
+                raise ValueError("这个单类旧模型没有拒识标定，普通运动也会被当成手势。请至少录制 3 次，选择合适预设后重新训练。")
+            self.recognition_origin = self.plot.next_sample
+            if not self.recognizer.has_rejection:
+                self.log("警告：旧模型未配置未知动作拒识，建议重新训练。")
+            self.log("实时试识别已开启；仅通过检查的片段画紫框。单类没有相对置信度，拒识标定仍需用负样本检验。")
         except Exception as exc:
             self.stop_live()
             self.error(str(exc))
@@ -665,9 +923,16 @@ class Studio:
             try:
                 for start in range(0, len(payload), 32):
                     for prediction in self.recognizer.feed(payload[start:start + 32]):
-                        text = f"{prediction.name}；置信度 {prediction.confidence:.3f}（非概率）；分数 {prediction.score:.3f}"
+                        assessment = ("单类匹配，通过拒识检查（无相对置信度）" if prediction.confidence is None else
+                                      f"相对置信度 {prediction.confidence:.3f}（非概率）")
+                        text = f"{prediction.name}；{assessment}；分数 {prediction.score:.3f}"
                         self.result.set(f"识别结果：{text}")
                         self.log(text)
+                        if prediction.start_sample is not None and prediction.end_sample is not None:
+                            self.plot.add_recognition(self.recognition_origin + prediction.start_sample,
+                                                      self.recognition_origin + prediction.end_sample,
+                                                      prediction.name if prediction.confidence is None else
+                                                      f"{prediction.name} {prediction.confidence:.2f}")
             except Exception as exc:
                 self.stop_live()
                 self.log(f"试识别已停止：{exc}")
@@ -688,6 +953,7 @@ class Studio:
             return
         self.drain_events()
         self.plot.redraw()
+        self.preview_plot.redraw()
         self.root.after(50, self.poll)
 
     def set_stream_state(self, payload):
@@ -699,6 +965,7 @@ class Studio:
                 self.plot.set_sample_rate(rate)
                 if self.recognizer is not None:
                     self.recognizer.reset()
+                    self.recognizer = None
             self.actual_rate = rate
             message = f"{message}；{rate:g} Hz"
             if payload.get("accel_range_g") is not None:
@@ -706,24 +973,33 @@ class Studio:
         else:
             self.actual_rate = None
             self.cancel_take()
-            self.stop_live()
+            if self.connected and self.live.get():
+                if self.recognizer is not None:
+                    self.recognizer.reset()
+                self.recognizer = None
+                self.result.set("识别已暂停；IMU 恢复后自动继续（请先静止）")
+            else:
+                self.stop_live()
             self.raw.set("ax / ay / az / gx / gy / gz：—（无新数据，未断言 BLE 断开）")
         self.imu_active = active
         self.stream_text.set(message)
         self.plot.set_status(message)
+        if active and self.live.get() and self.recognizer is None and self.audio_state in {"idle", "listening"}:
+            self.toggle_live()
 
     def handle(self, event, payload):
         if event == "samples":
             self.samples(payload)
         elif event == "devices":
-            self.devices = {f"{d.get('name') or '未命名'} | {d['address']} | RSSI {d.get('rssi', '—')}": d["address"] for d in payload}
-            self.device_choice.configure(values=list(self.devices))
-            self.log(f"扫描发现 {len(self.devices)} 个设备。")
+            self.scanned_devices = list(payload)
+            self.refresh_device_choices()
+            self.log(f"扫描发现 {len(payload)} 个设备；已连接设备保留在历史中。")
         elif event == "connected":
             if not self.connecting:
                 self.request(self.worker.disconnect)
                 return
             self.connected, self.connecting = True, False
+            self.remember_device(payload)
             self.set_stream_state({"state": "waiting", "message": "BLE 已连接，正在等待新的 IMU 数据…"})
             self.count = 0
             self.plot.clear()
@@ -774,6 +1050,24 @@ class Studio:
             self.set_bundle(bundle, "trained", f"训练成功：{summary}")
             if revision != self.revision:
                 self.invalidate("训练期间数据或参数已改变")
+        elif event == "evaluated":
+            result, revision = payload
+            self.finish_training()
+            metric = "单类正样本通过率（不代表误触率）" if len(result["per_class"]) == 1 else "已知手势留出识别率"
+            text = f"{metric}：{result['correct']}/{result['total']}（{result['accuracy']:.1%}）；未做连续流负样本评估"
+            if revision != self.revision:
+                text += "；数据/参数已改变，此为评估开始时的结果"
+            self.evaluation_text.set(text)
+            self.evaluation_revision = revision
+            self.log(text)
+            for name, counts in result["per_class"].items():
+                self.log(f"{name}：{counts['correct']}/{counts['total']}；预测分布 {result['confusion'][name]}；"
+                         f"跳过过短录制 {result['skipped_recordings'][name]} 次")
+            self.log("留出评估不是跨会话/真机准确率；请另录独立数据验证。当前模型未被替换。")
+        elif event == "evaluation_failed":
+            self.finish_training()
+            self.evaluation_text.set("留出评估失败；带拒识标定时每类需至少 4 次有效录制，当前模型保持不变。")
+            self.error(payload)
         elif event == "train_failed":
             self.finish_training()
             self.model_text.set("训练失败；没有生成新模型。请查看日志并修正数据或参数。")
@@ -782,7 +1076,7 @@ class Studio:
     def close(self):
         if self.closing or not self.confirm_discard():
             return
-        if self.training and not messagebox.askyesno("训练尚未完成", "关闭窗口将放弃本次训练结果；后台计算可能稍后才结束。继续？", parent=self.root):
+        if self.training and not messagebox.askyesno("训练 / 评估尚未完成", "关闭窗口将放弃本次结果；后台计算可能稍后才结束。继续？", parent=self.root):
             return
         if self.audio_state != "idle" and not messagebox.askyesno(
                 "音频接收尚未结束", "退出将停止电脑接收/下载，不控制戒指录音。完整收到的音频会继续保存；未完整文件需重新下载。继续？", parent=self.root):

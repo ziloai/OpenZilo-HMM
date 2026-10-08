@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import butter, medfilt, sosfilt
+from scipy.signal import butter, medfilt, sosfilt, sosfilt_zi
 
 from .config import PipelineConfig, integer
 
@@ -29,13 +29,15 @@ def validate_samples(samples: object, *, allow_empty: bool = False) -> np.ndarra
 
 class SignalFilter:
     def __init__(self, sample_rate: float = 25.0, cutoff_hz: float = 10.0,
-                 order: int = 2, median_kernel: int = 5):
+                 order: int = 2, median_kernel: int = 5, initialization: str = "zero"):
         PipelineConfig(sample_rate_hz=sample_rate, cutoff_hz=cutoff_hz,
-                       filter_order=order, median_kernel=median_kernel)
+                       filter_order=order, median_kernel=median_kernel,
+                       filter_initialization=initialization)
         self.sample_rate = sample_rate
         self.cutoff_hz = cutoff_hz
         self.order = order
         self.median_kernel = median_kernel
+        self.initialization = initialization
         self._sos = butter(order, cutoff_hz / (sample_rate / 2), btype="low", output="sos")
 
     def apply(self, raw: np.ndarray) -> np.ndarray:
@@ -43,7 +45,10 @@ class SignalFilter:
         for ax in range(6):
             if self.median_kernel > 1:
                 data[:, ax] = medfilt(data[:, ax], kernel_size=self.median_kernel)
-            data[:, ax] = sosfilt(self._sos, data[:, ax])
+            if self.initialization == "steady":
+                data[:, ax], _ = sosfilt(self._sos, data[:, ax], zi=sosfilt_zi(self._sos) * data[0, ax])
+            else:
+                data[:, ax] = sosfilt(self._sos, data[:, ax])
         return data
 
 
@@ -73,5 +78,5 @@ class FeatureExtractor:
 
 def make_pipeline(config: PipelineConfig) -> tuple[SignalFilter, FeatureExtractor]:
     return (SignalFilter(config.sample_rate_hz, config.cutoff_hz,
-                         config.filter_order, config.median_kernel),
+                         config.filter_order, config.median_kernel, config.filter_initialization),
             FeatureExtractor(config.window_size, config.window_overlap))

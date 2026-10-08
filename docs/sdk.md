@@ -86,7 +86,7 @@ Important boundaries:
 
 Studio now manages BLE independently of `open_ring_stream`, which is retained for legacy CLIs. `DEVICE_BUSY` or an IMU timeout is not evidence of BLE disconnection. Studio waits/retries reporting while keeping the link, verifies recovery with fresh data rather than an ACK alone, and reconnects with backoff on actual transport loss. Manual disconnect cancels retries. Reissuing START resets sensor sequence numbers, so it is a recovery operation, not a continuous heartbeat.
 
-The SDK/firmware contract is **physical-button recording**: hold the ring button in recording mode, then release to save and push `0x0505` frames. There is no host start/stop recording command. `receive_auto_audio_file` assembles a pushed file; `get_audio_file_count` enumerates indices; `download_audio_file` retrieves missed files. `get_audio_file_info` starts extraction, so it is not used merely to populate a list. Listening/download operations are mutually exclusive and pause IMU commands. Stopping reception does not stop the ring microphone; incomplete transfers are not reported as saved and can be downloaded again.
+The SDK/firmware contract is **physical-button recording**: hold the ring button in recording mode, then release to save and push `0x0505` frames. There is no host start/stop recording command. `receive_auto_audio_file` assembles a pushed file; `get_audio_file_count` enumerates indices; `download_audio_file` retrieves missed files. `get_audio_file_info` starts extraction, so it is not used merely to populate a list. Passive automatic listening leaves IMU probing/consumption running. Only when audio frames are queued does the single owner pause IMU to receive a file; it resumes afterwards while keeping the listener armed. Explicit queries/downloads remain exclusive with the automatic listener and pause IMU commands. Stopping reception does not stop the ring microphone; incomplete transfers are not reported as saved and can be downloaded again.
 
 The SDK has no request/write lock. Studio serializes sends and cleans up extraction on cancellation. GUI state distinguishes listening, receiving, saving and disconnected states. Audio conversion uses SDK parsing/container helpers plus a bounded ffmpeg subprocess, off the BLE/Tk threads. Raw files are saved before decoding with unique filenames; durations come from decoded WAV headers. These are application recovery policies; mode transitions and reconnect timing still require hardware validation.
 
@@ -139,7 +139,7 @@ Bleak 由 SDK 自动安装。手势功能不需要 `ffmpeg`；Studio 戒指录�
 
 Studio 的 BLE 生命周期已与 IMU 上报解耦；`open_ring_stream` 保留给旧命令行。`DEVICE_BUSY` 或收数超时只说明 IMU 暂不可用，不直接断开 BLE；恢复时重新开启上报并等待新数据。真正的传输断连才退避重连，手动断开停止重试。START 会重置序号，因此不作为连续心跳。单击事件不是模式查询结果。
 
-戒指录音必须在录音模式下**长按物理按键，松开后保存并推送**。SDK 没有电脑端开始/停止录音命令。Studio 用 `receive_auto_audio_file` 接收，用 `get_audio_file_count` 列索引，用 `download_audio_file` 下载历史录音；`get_audio_file_info` 会启动提取，不能单纯用于列表展示。音频接收/下载互斥，期间暂停 IMU 请求；停止电脑接收并不能停止戒指麦克风，未完整传输的文件需重新下载。
+戒指录音必须在录音模式下**长按物理按键，松开后保存并推送**。SDK 没有电脑端开始/停止录音命令。Studio 用 `receive_auto_audio_file` 接收，用 `get_audio_file_count` 列索引，用 `download_audio_file` 下载历史录音；`get_audio_file_info` 会启动提取，不能单纯用于列表展示。自动监听待机时继续 IMU 探测/收数；检测到音频帧后，同一消费者才暂停 IMU 并接收一个文件，完成后保持监听并恢复 IMU。显式查询/下载与自动监听互斥，操作期间暂停 IMU 请求；停止电脑接收并不能停止戒指麦克风，未完整传输的文件需重新下载。
 
 SDK 自身没有请求/写锁，Studio 负责串行发送、取消时结束提取、断连清理。先以唯一文件名保存原始数据，再在后台用 SDK 的解析/封装功能及限时 ffmpeg 解码；WAV 时长由文件头计算，不以传输用时冒充录音时长。真实模式切换与重连行为仍须真机验证。
 

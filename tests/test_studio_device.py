@@ -29,11 +29,10 @@ class WorkerTests(unittest.TestCase):
         self.history = []
         self.order = []
         self.waiting = threading.Event()
-        self.audio_waiting = threading.Event()
         self.connecting = threading.Event()
         self.stopping = threading.Event()
         self.source = asyncio.Queue()
-        self.audio_source = asyncio.Queue()
+        self.audio_gate = None
         self.gates = []
         self.active = self.max_active = 0
         self.rings = []
@@ -109,11 +108,13 @@ class WorkerTests(unittest.TestCase):
         self.receive = self.stack.enter_context(patch.object(sdk, "wait_sensor_data", side_effect=receive))
 
         async def auto(ring, **kwargs):
-            self.audio_waiting.set()
-            item = await self.audio_source.get()
+            self.assertEqual(self.active, 0)
+            item = await ring._queues[int(sdk.AudioCommand.DATA_FRAME)].get()
             if isinstance(item, Exception):
                 raise item
             ring.audio_observer(SimpleNamespace(frame_offset=0, data=item[1]))
+            if self.audio_gate is not None:
+                await self.audio_gate.wait()
             return item
         self.auto = self.stack.enter_context(patch.object(sdk, "receive_auto_audio_file", side_effect=auto))
         self.count = self.stack.enter_context(patch.object(sdk, "get_audio_file_count", new_callable=AsyncMock, return_value=3))
@@ -164,6 +165,20 @@ class WorkerTests(unittest.TestCase):
     def feed(self, value):
         self.worker._loop.call_soon_threadsafe(self.source.put_nowait, value)
 
+    def feed_audio(self, *values):
+        def push():
+            for value in values:
+                self.rings[-1]._queues[int(sdk.AudioCommand.DATA_FRAME)].put_nowait(value)
+        self.worker._loop.call_soon_threadsafe(push)
+
+    def housekeeping_pass(self):
+        async def check():
+            task = asyncio.create_task(self.worker._housekeeping(self.rings[-1]))
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        asyncio.run_coroutine_threadsafe(check(), self.worker._loop).result(timeout=3)
+
     def batch(self, sequence=0, timestamp=100):
         return sdk.SensorDataBatch(sequence, 1, 16, (
             sdk.SensorDataSample(timestamp, -32768, 32767, 3, 4, -5, 6),
@@ -184,11 +199,13 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(state["sample_rate_hz"], 50)
         self.assertEqual(self.event("samples"), [[-32768, 32767, 3, 4, -5, 6]])
 
-    def listen(self):
-        self.worker.start_audio("out")
-        self.assertTrue(self.audio_waiting.wait(3))
-        self.assertEqual(self.active, 0)
-        self.assertIn("stop", self.order)
+    def listen(self, directory="out"):
+        self.worker.start_audio(directory)
+        self.event("audio_state", "listening")
+        self.assertTrue(self.worker._audio_armed)
+        self.assertEqual(self.worker._audio_directory, directory)
+        self.assertFalse(self.worker._audio_busy)
+        self.assertIsNone(self.worker._audio_task)
 
     def test_scan_and_duplicate_request(self):
         self.scan.return_value = [SimpleNamespace(name="Ring", address="A", rssi=-61)]
@@ -239,6 +256,30 @@ class WorkerTests(unittest.TestCase):
         self.event("stream_state", "active")
         self.event("samples")
         self.assertEqual(len(self.rings), 1)
+
+    def test_armed_listener_recovers_from_recording_busy_to_gesture_mode(self):
+        gesture_mode = threading.Event()
+        async def start(*args, **kwargs):
+            if not gesture_mode.is_set():
+                raise sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY)
+            return self.start_info
+        self.start_report.side_effect = start
+        self.connect()
+        self.event("stream_state", "suspended")
+        self.listen()
+        gesture_mode.set()
+        # No audio, key event or manual retry is needed to recover gesture mode.
+        self.assertTrue(self.waiting.wait(3))
+        self.feed(self.batch())
+        self.event("stream_state", "active")
+        self.event("samples")
+        self.assertTrue(self.worker._audio_armed)
+        self.assertFalse(self.worker._audio_busy)
+        self.assertEqual(self.worker._audio_state, "listening")
+        self.assertEqual(self.max_active, 1)
+        self.assertEqual(len(self.rings), 1)
+        self.auto.assert_not_awaited()
+        self.stop_report.assert_not_awaited()
 
     def test_batches_arriving_before_start_ack_are_discarded(self):
         async def start(*args, **kwargs):
@@ -308,6 +349,25 @@ class WorkerTests(unittest.TestCase):
         self.event("connected")
         self.assertEqual([r.address for r in self.rings], ["manual-address"] * 2)
 
+    def test_reconnect_and_close_clear_passive_audio_subscription(self):
+        self.streaming()
+        self.listen()
+        self.worker._loop.call_soon_threadsafe(setattr, self.rings[0], "is_connected", False)
+        self.event("reconnecting")
+        self.event("connected")
+        self.assertFalse(self.worker._audio_armed)
+        self.assertIsNone(self.worker._audio_directory)
+        self.assertFalse(self.worker._audio_busy)
+        self.assertIsNone(self.worker._audio_task)
+        self.assertIsNone(self.worker._audio_pending)
+        self.listen("new-output")
+        self.worker.close().result(timeout=3)
+        self.assertFalse(self.worker._audio_armed)
+        self.assertIsNone(self.worker._audio_directory)
+        self.assertIsNone(self.worker._ring)
+        self.assertIsNone(self.worker._wake)
+        self.auto.assert_not_awaited()
+
     def test_cancel_reconnect_backoff(self):
         self.stack.enter_context(patch.object(device, "RECONNECT_DELAYS", (30,)))
         self.streaming()
@@ -373,8 +433,13 @@ class WorkerTests(unittest.TestCase):
     def test_cancel_audio_while_imu_stop_is_pending(self):
         self.streaming()
         self.stop_gate = self.gate()
-        self.worker.start_audio("out")
+        self.listen()
+        self.feed_audio((2, b"data"))
         self.assertTrue(self.stopping.wait(3))
+        self.feed(self.batch(88, 8888))
+        self.housekeeping_pass()
+        self.assertEqual(self.source.qsize(), 1)  # Pending is not an active audio consumer.
+        self.assertEqual(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].qsize(), 1)
         self.worker.stop_audio()
         self.event("audio_state", "idle")
         self.waiting.clear()
@@ -382,6 +447,8 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(self.waiting.wait(3))
         self.auto.assert_not_awaited()
         self.assertFalse(self.worker._audio_busy)
+        self.assertFalse(self.worker._audio_armed)
+        self.assertIsNone(self.worker._audio_directory)
 
     def test_audio_list_uses_count_not_metadata_or_extraction(self):
         self.streaming()
@@ -390,26 +457,189 @@ class WorkerTests(unittest.TestCase):
         self.file_info.assert_not_awaited()
         self.download.assert_not_awaited()
 
-    def test_listening_excludes_download_and_imu_commands(self):
+    def test_armed_without_frames_keeps_imu_and_excludes_manual_audio(self):
         self.streaming()
         self.listen()
-        starts = self.start_report.await_count
-        stops = self.stop_report.await_count
         self.worker.download_audio(2, "out")
         self.assertIn("Stop", self.event("error"))
         self.worker.list_audio()
         self.event("error")
-        self.worker.retry_imu()
-        # A completed transfer is a deterministic barrier, not a sleep/poll.
-        self.worker._loop.call_soon_threadsafe(self.audio_source.put_nowait, (2, b"data"))
-        self.assertIs(self.event("audio_saved"), self.saved)
-        self.assertEqual(self.start_report.await_count, starts)
-        self.assertEqual(self.stop_report.await_count, stops)
+        for i in range(1, 4):
+            self.housekeeping_pass()
+            self.feed(self.batch(i, 100 + i))
+            self.event("samples")
+        # Listening/housekeeping are not START_REPORT heartbeats.
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
+        self.auto.assert_not_awaited()
         self.download.assert_not_awaited()
         self.count.assert_not_awaited()
+        self.assertTrue(self.worker._audio_armed)
+        self.assertEqual(self.worker._stream_state, "active")
+        self.assertEqual(self.max_active, 1)
+
+    def test_auto_file_returns_to_listening_and_fresh_imu(self):
+        self.streaming()
+        self.listen()
+        self.waiting.clear()
+        self.feed_audio((2, b"data"))
+        self.assertIs(self.event("audio_saved"), self.saved)
+        self.event("audio_state", "listening")
+        self.assertTrue(self.waiting.wait(3))
+        self.feed(self.batch(0, 1))
+        self.event("stream_state", "active")
+        self.event("samples")
+        self.assertTrue(self.worker._audio_armed)
+        self.assertFalse(self.worker._audio_busy)
+        self.assertEqual(self.worker._audio_directory, "out")
+        self.assertEqual(self.start_report.await_count, 2)
+        self.stop_report.assert_awaited_once()
+        self.auto.assert_awaited_once_with(self.rings[0], timeout_s=device.AUDIO_TIMEOUT)
+        self.save.assert_called_once_with(b"data", 2, "out", metadata={})
+        self.assertEqual(self.max_active, 1)
+
+    def test_stop_disarms_listener_without_interrupting_imu(self):
+        self.streaming()
+        self.listen()
         self.worker.stop_audio()
         self.event("audio_state", "idle")
+        self.assertFalse(self.worker._audio_armed)
         self.assertFalse(self.worker._audio_busy)
+        self.assertIsNone(self.worker._audio_directory)
+        self.feed_audio((2, b"late"))
+        self.housekeeping_pass()
+        self.assertTrue(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].empty())
+        self.feed(self.batch(1, 101))
+        self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
+        self.auto.assert_not_awaited()
+
+    def test_stop_cancels_auto_transfer_and_finishes_end_before_resuming(self):
+        self.audio_gate = self.gate()
+        async def end(*args, **kwargs):
+            self.assertEqual(self.active, 0)
+            self.order.append("end")
+        self.end.side_effect = end
+        self.streaming()
+        self.listen()
+        self.feed_audio((2, b"part"))
+        self.event("audio_progress")
+        self.assertEqual(self.active, 0)
+        self.worker._loop.call_soon_threadsafe(setattr, self.rings[0], "audio_extract_index", 2)
+        self.worker.retry_imu()
+        self.feed(self.batch(88, 8888))
+        self.housekeeping_pass()
+        self.assertTrue(self.source.empty())
+        # Even retry hints cannot interleave commands with an audio transfer.
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_awaited_once()
+        self.waiting.clear()
+        self.worker.stop_audio()
+        self.event("audio_state", "idle")
+        self.assertTrue(self.waiting.wait(3))
+        self.end.assert_awaited_once_with(self.rings[0], 2, timeout_s=device.CLEANUP_TIMEOUT, ignore_timeout=True)
+        self.assertIsNone(self.rings[0].audio_extract_index)
+        self.assertIsNone(self.rings[0].audio_observer)
+        self.assertFalse(self.worker._audio_armed)
+        self.assertFalse(self.worker._audio_busy)
+        self.assertIsNone(self.worker._audio_directory)
+        self.assertIsNone(self.worker._audio_task)
+        self.save.assert_not_called()
+        self.feed(self.batch(0, 1))
+        self.event("stream_state", "active")
+        self.event("samples")
+        self.assertEqual(self.max_active, 1)
+
+    def test_stop_during_normal_auto_end_finishes_cleanup_after_saving(self):
+        ending = threading.Event()
+        async def end(*args, **kwargs):
+            self.save.assert_called_once()
+            self.assertEqual(self.active, 0)
+            if self.end.await_count == 1:
+                ending.set()
+                await asyncio.Event().wait()
+        self.end.side_effect = end
+        self.streaming()
+        self.listen()
+        self.worker._loop.call_soon_threadsafe(setattr, self.rings[0], "audio_extract_index", 2)
+        self.feed_audio((2, b"data"))
+        self.event("audio_saved")
+        self.assertTrue(ending.wait(3))
+        self.waiting.clear()
+        self.worker.stop_audio()
+        self.event("audio_state", "idle")
+        self.assertTrue(self.waiting.wait(3))
+        self.assertEqual(self.end.await_count, 2)
+        self.assertIsNone(self.rings[0].audio_extract_index)
+        self.assertIsNone(self.rings[0].audio_observer)
+        self.assertFalse(self.worker._audio_armed)
+        self.assertFalse(self.worker._audio_busy)
+
+    def test_disconnect_does_not_recancel_auto_extraction_cleanup(self):
+        self.audio_gate = self.gate()
+        end_gate = self.gate()
+        ending = threading.Event()
+        async def end(*args, **kwargs):
+            ending.set()
+            await end_gate.wait()
+            self.order.append("end")
+        self.end.side_effect = end
+        self.streaming()
+        self.listen()
+        self.feed_audio((2, b"part"))
+        self.event("audio_progress")
+        self.worker._loop.call_soon_threadsafe(setattr, self.rings[0], "audio_extract_index", 2)
+        self.worker.stop_audio()
+        self.assertTrue(ending.wait(3))
+        self.worker.stop_audio()
+        self.worker.disconnect()
+        self.worker._loop.call_soon_threadsafe(end_gate.set)
+        self.event("disconnected")
+        self.end.assert_awaited_once()
+        self.assertLess(self.order.index("end"), self.order.index("disconnect"))
+        self.assertFalse(self.worker._audio_armed)
+        self.assertIsNone(self.worker._audio_directory)
+        self.assertIsNone(self.worker._audio_task)
+        self.assertIsNone(self.rings[0].audio_observer)
+        self.assertIsNone(self.rings[0].audio_extract_index)
+        self.save.assert_not_called()
+
+    def test_consecutive_auto_files_are_not_drained_while_saving_or_rearming(self):
+        saving = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        def save(data, index, directory, *, metadata):
+            if index == 2:
+                saving.set()
+                self.assertTrue(release.wait(3))
+            return {**self.saved, "file_index": index}
+        self.save.side_effect = save
+        self.streaming()
+        self.listen()
+        self.waiting.clear()
+        self.feed_audio((2, b"first"))
+        self.assertTrue(saving.wait(3))
+        self.feed_audio((3, b"second"), (4, b"third"))
+        self.housekeeping_pass()
+        self.assertEqual(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].qsize(), 2)
+        self.assertTrue(self.worker._audio_busy)
+        self.assertEqual(self.active, 0)
+        release.set()
+        self.assertEqual([self.event("audio_saved")["file_index"] for _ in range(3)], [2, 3, 4])
+        self.event("audio_state", "listening")
+        self.assertTrue(self.waiting.wait(3))
+        self.feed(self.batch(0, 1))
+        self.event("stream_state", "active")
+        self.event("samples")
+        self.assertEqual(self.auto.await_count, 3)
+        self.assertEqual([call.args for call in self.save.call_args_list], [
+            (b"first", 2, "out"), (b"second", 3, "out"), (b"third", 4, "out"),
+        ])
+        self.assertTrue(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].empty())
+        self.assertTrue(self.worker._audio_armed)
+        self.assertFalse(self.worker._audio_busy)
+        self.assertEqual(self.max_active, 1)
 
     def test_download_explicit_index_progress_and_metadata(self):
         async def download(ring, index, *, quick, progress, timeout_s):
@@ -443,18 +673,40 @@ class WorkerTests(unittest.TestCase):
         self.end.assert_awaited_once_with(self.rings[0], 7, timeout_s=device.CLEANUP_TIMEOUT, ignore_timeout=True)
         self.save.assert_not_called()
 
-    def test_auto_first_frame_timeout_continues_but_partial_failure_does_not_save(self):
+    def test_auto_first_frame_timeout_releases_imu_and_stays_armed(self):
         self.streaming()
         self.listen()
-        self.audio_waiting.clear()
-        self.worker._loop.call_soon_threadsafe(self.audio_source.put_nowait, sdk.TimeoutError("no first frame"))
-        self.assertTrue(self.audio_waiting.wait(3))
-        def broken():
-            self.rings[0].audio_observer(SimpleNamespace(frame_offset=0, data=b"part"))
-            self.audio_source.put_nowait(sdk.TimeoutError("missing frame"))
-        self.worker._loop.call_soon_threadsafe(broken)
+        self.waiting.clear()
+        self.feed_audio(sdk.TimeoutError("no first frame"))
+        self.event("audio_state", "receiving")
+        self.event("audio_state", "listening")
+        self.assertTrue(self.waiting.wait(3))
+        self.feed(self.batch(0, 1))
+        self.event("stream_state", "active")
+        self.event("samples")
+        self.assertTrue(self.worker._audio_armed)
+        self.assertFalse(self.worker._audio_busy)
+        self.auto.assert_awaited_once()
+        self.save.assert_not_called()
+        self.assertFalse(any(e == "error" for e, _, _ in self.history))
+
+    def test_auto_partial_failure_does_not_save_and_releases_imu(self):
+        receive = self.auto.side_effect
+        async def broken(ring, **kwargs):
+            await receive(ring, **kwargs)
+            raise sdk.TimeoutError("missing frame")
+        self.auto.side_effect = broken
+        self.streaming()
+        self.listen()
+        self.waiting.clear()
+        self.feed_audio((2, b"part"))
         self.assertIn("ring history", self.event("error"))
-        self.event("audio_state", "idle")
+        self.event("audio_state", "listening")
+        self.assertTrue(self.waiting.wait(3))
+        self.feed(self.batch(0, 1))
+        self.event("samples")
+        self.assertTrue(self.worker._audio_armed)
+        self.assertFalse(self.worker._audio_busy)
         self.save.assert_not_called()
         self.assertFalse(any(e == "audio_saved" for e, _, _ in self.history))
 
@@ -471,7 +723,7 @@ class WorkerTests(unittest.TestCase):
         self.save.side_effect = save
         self.streaming()
         self.listen()
-        self.worker._loop.call_soon_threadsafe(self.audio_source.put_nowait, (2, b"data"))
+        self.feed_audio((2, b"data"))
         self.assertTrue(saving.wait(3))
         self.worker.stop_audio()
         self.event("audio_state", "stopping")
@@ -481,6 +733,10 @@ class WorkerTests(unittest.TestCase):
         result.result(timeout=3)
         self.assertIs(self.event("audio_saved"), self.saved)
         self.assertLess(self.order.index("saved"), self.order.index("disconnect"))
+        self.assertFalse(self.worker._audio_armed)
+        self.assertIsNone(self.worker._audio_directory)
+        self.assertIsNone(self.worker._audio_task)
+        self.assertIsNone(self.worker._audio_pending)
 
     def test_decoder_failure_preserves_raw_and_connection(self):
         from hmm_gesture_studio.audio import save_recording
@@ -488,9 +744,8 @@ class WorkerTests(unittest.TestCase):
         self.stack.enter_context(patch.object(sdk, "decode_audio_to_wav", side_effect=sdk.SpeexDecoderUnavailable("ffmpeg missing")))
         with tempfile.TemporaryDirectory() as directory:
             self.streaming()
-            self.worker.start_audio(directory)
-            self.assertTrue(self.audio_waiting.wait(3))
-            self.worker._loop.call_soon_threadsafe(self.audio_source.put_nowait, (2, b"data"))
+            self.listen(directory)
+            self.feed_audio((2, b"data"))
             self.assertIn("ffmpeg", self.event("warning"))
             result = self.event("audio_saved")
             self.assertEqual(Path(result["raw_path"]).read_bytes(), b"data")
@@ -501,9 +756,9 @@ class WorkerTests(unittest.TestCase):
         self.save.side_effect = OSError("disk full")
         self.streaming()
         self.listen()
-        self.worker._loop.call_soon_threadsafe(self.audio_source.put_nowait, (2, b"data"))
+        self.feed_audio((2, b"data"))
         self.assertIn("disk full", self.event("error"))
-        self.event("audio_state", "idle")
+        self.event("audio_state", "listening")
         self.assertTrue(self.rings[0].is_connected)
         self.assertEqual(len(self.rings), 1)
         self.assertFalse(any(e == "audio_saved" for e, _, _ in self.history))

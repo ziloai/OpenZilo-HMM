@@ -12,10 +12,10 @@ from typing import Any
 from hmmlearn.hmm import GaussianHMM
 import numpy as np
 
-from .config import AXES, N_FEATURES, PipelineConfig, SegmentationConfig
+from .config import AXES, N_FEATURES, PipelineConfig, SegmentationConfig, RejectionCalibration
 
 FORMAT = "hmm-gesture"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 MAX_BUNDLE_BYTES = 32 * 1024 * 1024
 
 
@@ -95,8 +95,20 @@ def _load_model(raw: object) -> GaussianHMM:
         raise ValueError(f"Invalid model parameters: {exc}") from exc
 
 
-def _load_config(cls: type, raw: object) -> Any:
-    if not isinstance(raw, dict) or set(raw) != set(cls.__dataclass_fields__):
+def _config_dict(config, version):
+    fields = asdict(config)
+    if version == 1:
+        # Version 1 always used zero filter state and baseline-motion segmentation.
+        for key in ("filter_initialization", "mode", "post_roll"):
+            fields.pop(key, None)
+    return fields
+
+
+def _load_config(cls: type, raw: object, version: int = FORMAT_VERSION) -> Any:
+    fields = set(cls.__dataclass_fields__)
+    if version == 1:
+        fields -= {"filter_initialization", "mode", "post_roll"}
+    if not isinstance(raw, dict) or set(raw) != fields:
         raise ValueError(f"Missing or unsupported fields in {cls.__name__}")
     try:
         return cls(**raw)
@@ -110,6 +122,7 @@ class GestureBundle:
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
     metadata: dict[str, Any] = field(default_factory=dict)
+    rejection: dict[str, RejectionCalibration] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.pipeline, PipelineConfig) or not isinstance(self.segmentation, SegmentationConfig):
@@ -119,6 +132,13 @@ class GestureBundle:
         for name, model in self.models.items():
             validate_name(name)
             _model_arrays(model)
+        if self.rejection is not None:
+            if not isinstance(self.rejection, dict) or set(self.rejection) != set(self.models):
+                raise ValueError("Rejection calibration must cover every gesture exactly")
+            for calibration in self.rejection.values():
+                if not isinstance(calibration, RejectionCalibration):
+                    raise ValueError("Invalid rejection calibration")
+                calibration.__post_init__()
         if not isinstance(self.metadata, dict):
             raise ValueError("Bundle metadata must be an object")
         try:
@@ -137,10 +157,16 @@ class GestureBundle:
             params = {key: value.tolist() for key, value in _model_arrays(model).items()}
             gestures.append({"name": name, "model": {"type": "gaussian-hmm",
                             "covariance_type": "diag", **params}})
-        data = {"format": FORMAT, "version": FORMAT_VERSION,
+        version = (1 if self.rejection is None and self.pipeline.filter_initialization == "zero"
+                   and self.segmentation.mode == "motion" and self.segmentation.post_roll == 0 else FORMAT_VERSION)
+        data = {"format": FORMAT, "version": version,
                 "axes": list(AXES), "units": "raw_int16",
-                "pipeline": asdict(self.pipeline), "segmentation": asdict(self.segmentation),
+                "pipeline": _config_dict(self.pipeline, version),
+                "segmentation": _config_dict(self.segmentation, version),
                 "gestures": gestures, "metadata": self.metadata}
+        if version >= 2:
+            data["rejection"] = ({name: asdict(value) for name, value in self.rejection.items()}
+                                 if self.rejection is not None else None)
         return write_json(path, data, max_bytes=MAX_BUNDLE_BYTES)
 
     @classmethod
@@ -154,12 +180,13 @@ class GestureBundle:
             raise ValueError("Not a valid UTF-8 gesture JSON bundle (pickle is not supported)") from exc
         if not isinstance(raw, dict) or raw.get("format") != FORMAT:
             raise ValueError("Not a hmm-gesture bundle; retrain/export legacy pickle models in Studio")
-        if type(raw.get("version")) is not int or raw["version"] != FORMAT_VERSION:
+        if type(raw.get("version")) is not int or raw["version"] not in (1, FORMAT_VERSION):
             raise ValueError(f"Unsupported gesture bundle version: {raw.get('version')}")
         if raw.get("axes") != list(AXES) or raw.get("units") != "raw_int16":
             raise ValueError("Unsupported axis order or sensor units")
-        pipeline = _load_config(PipelineConfig, raw.get("pipeline"))
-        segmentation = _load_config(SegmentationConfig, raw.get("segmentation"))
+        version = raw["version"]
+        pipeline = _load_config(PipelineConfig, raw.get("pipeline"), version)
+        segmentation = _load_config(SegmentationConfig, raw.get("segmentation"), version)
         gestures = raw.get("gestures")
         if not isinstance(gestures, list) or not gestures:
             raise ValueError("Bundle must contain a nonempty gestures list")
@@ -171,4 +198,15 @@ class GestureBundle:
             if name in models:
                 raise ValueError(f"Duplicate gesture name: {name}")
             models[name] = _load_model(entry.get("model"))
-        return cls(models, pipeline, segmentation, raw.get("metadata", {}))
+        rejection = None
+        if version >= 2:
+            if "rejection" not in raw:
+                raise ValueError("Version 2 requires an explicit rejection field")
+            if raw["rejection"] is not None:
+                if not isinstance(raw["rejection"], dict):
+                    raise ValueError("Rejection calibration must be an object or null")
+                rejection = {name: _load_config(RejectionCalibration, value)
+                             for name, value in raw["rejection"].items()}
+        elif "rejection" in raw:
+            raise ValueError("Version 1 cannot contain rejection calibration")
+        return cls(models, pipeline, segmentation, raw.get("metadata", {}), rejection)

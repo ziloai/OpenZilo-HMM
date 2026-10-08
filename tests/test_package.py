@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from hmm_gesture import GestureBundle, GestureRecognizer, PipelineConfig, SegmentationConfig
+from hmm_gesture import GestureBundle, GestureRecognizer, PipelineConfig, SegmentationConfig, RejectionCalibration
 from hmm_gesture.preprocessing import FeatureExtractor, SignalFilter
 from hmm_gesture.segmentation import MotionSegmenter
 from hmm_gesture_studio.datasets import GestureDataset, load_dataset, save_dataset
@@ -138,7 +138,7 @@ print(recognizer.gesture_names)
                 GestureRecognizer(self.bundle, confidence)
         single = GestureBundle({"one": next(iter(self.bundle.models.values()))}, self.config)
         result = GestureRecognizer(single).predict(self.datasets[0].repetitions[0])
-        self.assertEqual(result.confidence, 0.8)
+        self.assertIsNone(result.confidence)
         self.assertIsNone(GestureRecognizer(single, min_confidence=0.9).predict(self.datasets[0].repetitions[0]))
 
 
@@ -162,11 +162,38 @@ class SegmentationTests(unittest.TestCase):
 
     def test_public_feed_returns_every_completed_prediction(self):
         bundle = train_datasets([recordings()], PipelineConfig())
+        bundle.rejection = {bundle.gesture_names[0]: RejectionCalibration(-1e30, 0, 12, 125)}
         recognizer = GestureRecognizer(bundle)
         self.assertEqual(len(recognizer.feed(self.stream)), 2)
         self.assertEqual(recognizer.feed([]), [])
         recognizer.reset()
         self.assertEqual(len(recognizer.feed(self.stream)), 2)
+
+    def test_stream_intervals_match_input_across_batches_and_reset(self):
+        for size in (1, 5, 32, 1000):
+            segmenter = MotionSegmenter()
+            actual = []
+            for offset in range(0, len(self.stream), size):
+                actual.extend(segmenter.feed_segments(self.stream[offset:offset + size]))
+            self.assertEqual([(s.start_sample, s.end_sample) for s in actual], [(27, 50), (77, 100)])
+            for segment in actual:
+                np.testing.assert_array_equal(segment.samples,
+                                              self.stream[segment.start_sample:segment.end_sample])
+            segmenter.reset()
+            again = segmenter.feed_segments(self.stream)
+            self.assertEqual(again[0].start_sample, 27)
+
+    def test_predictions_include_exact_stream_interval_not_completion_time(self):
+        bundle = train_datasets([recordings()], PipelineConfig())
+        bundle.rejection = {bundle.gesture_names[0]: RejectionCalibration(-1e30, 0, 12, 125)}
+        recognizer = GestureRecognizer(bundle)
+        results = recognizer.feed(self.stream)
+        self.assertEqual([(r.start_sample, r.end_sample) for r in results], [(27, 50), (77, 100)])
+        offline = recognizer.predict(self.stream[27:50])
+        self.assertIsNone(offline.start_sample)
+        self.assertIsNone(offline.end_sample)
+        self.assertEqual(results[0].score, offline.score)
+        self.assertEqual(GestureRecognizer(bundle, min_confidence=0.9).feed(self.stream), [])
 
     def test_reset_relearns_baseline(self):
         segmenter = MotionSegmenter()

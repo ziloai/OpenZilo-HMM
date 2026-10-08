@@ -104,9 +104,11 @@ class RingWorker:
         self._ring = None
         self._wake = None
         self._retry_requested = False
+        self._audio_armed = False
+        self._audio_directory = None
         self._audio_pending = None
         self._audio_task = None
-        self._audio_busy = False
+        self._audio_busy = False  # Pending/active operation, not passive arming.
         self._stream_state = None
         self._audio_state = None
         self._audio_message = None
@@ -240,7 +242,7 @@ class RingWorker:
             self._wake.set()
 
     def start_audio(self, directory) -> None:
-        """Listen for files pushed after the user releases the ring button."""
+        """Arm auto reception; pause IMU only while receiving a pushed file."""
         self._control(self._accept_audio, "listen", None, directory)
 
     def list_audio(self) -> None:
@@ -250,7 +252,7 @@ class RingWorker:
         self._control(self._accept_audio, "download", file_index, directory)
 
     def stop_audio(self) -> None:
-        """Cancel reception/extraction, never send a recording command."""
+        """Disarm and cancel reception/extraction; never command recording."""
         self._control(self._stop_audio)
 
     def _accept_audio(self, kind, index, directory):
@@ -260,23 +262,35 @@ class RingWorker:
             self._emit("error", "Connect a ring before using audio.")
             self._audio("idle", "Not connected.")
             return
-        if self._audio_busy:
+        if self._audio_busy or self._audio_armed:
+            # Manual extraction shares (and can drain) the auto-push queue.
             self._emit("error", "Stop the current audio operation first.")
             return
         if kind == "download" and (type(index) is not int or not 0 <= index <= 0xFFFFFFFF):
             self._emit("error", "Select an unsigned 32-bit audio file index.")
             self._audio("idle", "Invalid audio file index.")
             return
+        if kind == "listen":
+            # Arming is passive: only queued audio may interrupt the IMU owner.
+            self._audio_armed = True
+            self._audio_directory = directory
+            self._audio("listening", "Auto reception is on; gesture mode remains available.")
+        else:
+            self._queue_audio(kind, index, directory)
+
+    def _queue_audio(self, kind, index, directory):
         self._audio_busy = True
         self._audio_pending = (kind, index, directory)
         self._stream("suspended", "IMU paused for audio.")
-        self._audio({"listen": "listening", "list": "listing", "download": "downloading"}[kind],
-                    "Preparing audio; operate the ring button to record.")
+        self._audio({"listen": "receiving", "list": "listing", "download": "downloading"}[kind],
+                    "Preparing audio transfer.")
         self._wake.set()
 
     def _stop_audio(self):
-        if not self._audio_busy:
+        if not self._audio_armed and not self._audio_busy:
             return
+        self._audio_armed = False
+        self._audio_directory = None
         self._audio("stopping", "Stopping reception; incomplete files remain in ring history.")
         if self._audio_task is not None:
             self._cancel_task(self._audio_task)
@@ -348,6 +362,8 @@ class RingWorker:
         finally:
             # One cancellation only: a second could interrupt END/STOP or save.
             self._ring = None
+            self._audio_armed = False
+            self._audio_directory = None
             for task in (owner, monitor):
                 self._cancel_task(task)
             await asyncio.gather(owner, monitor, return_exceptions=True)
@@ -371,8 +387,15 @@ class RingWorker:
             for command in (0x0701, 0x0702, 0x0703, 0x0704):
                 _drain(ring, command)
             if not self._audio_busy:
-                _drain(ring, sdk.AudioCommand.DATA_FRAME)
-            elif self._audio_task is not None:
+                if self._audio_armed:
+                    # Peek only. The owner must stop IMU before the SDK receiver
+                    # runs: gap recovery can send extraction commands.
+                    audio_queue = ring._queues.get(int(sdk.AudioCommand.DATA_FRAME))
+                    if audio_queue is not None and not audio_queue.empty():
+                        self._queue_audio("listen", None, self._audio_directory)
+                else:
+                    _drain(ring, sdk.AudioCommand.DATA_FRAME)
+            if self._audio_task is not None:
                 _drain(ring, sdk.SensorCommand.DATA_FRAME)
             await asyncio.sleep(HOUSEKEEPING_INTERVAL)
 
@@ -426,7 +449,10 @@ class RingWorker:
                     finally:
                         self._audio_task = None
                         self._audio_busy = False
-                        self._audio("idle", "Audio reception is off.")
+                        if self._audio_armed:
+                            self._audio("listening", "Auto reception is on; gesture mode remains available.")
+                        else:
+                            self._audio("idle", "Audio reception is off.")
                     self._stream("waiting", "Resuming IMU; select gesture mode on the ring.")
                     continue
                 if self._retry_requested:
@@ -565,23 +591,19 @@ class RingWorker:
                 })
             else:
                 ring.audio_observer = observe
-                while True:
-                    self._check_interrupted()
-                    receiving = False
-                    received = 0
-                    self._audio("listening", "Hold/release the ring button to record; stop reception before gestures.")
-                    try:
-                        index, data = await sdk.receive_auto_audio_file(ring, timeout_s=AUDIO_TIMEOUT)
-                    except sdk.TimeoutError:
-                        if receiving:
-                            raise
-                        continue  # Waiting for the first frame, not a broken file.
-                    await self._save(data, index, directory, {})
-                    # Auto-stream gap recovery starts a normal extraction, but
-                    # the SDK auto receiver does not end that extraction itself.
-                    if ring.audio_extract_index is not None:
-                        await self._end_extract(ring, ring.audio_extract_index)
-                        ring.audio_extract_index = None
+                self._check_interrupted()
+                try:
+                    index, data = await sdk.receive_auto_audio_file(ring, timeout_s=AUDIO_TIMEOUT)
+                except sdk.TimeoutError:
+                    if receiving:
+                        raise
+                    return  # No first frame: yield back to IMU, leaving arming intact.
+                await self._save(data, index, directory, {})
+                # Save first. If cancellation interrupts normal END, the finally
+                # below must finish cleanup before the owner resumes IMU.
+                if ring.audio_extract_index is not None:
+                    await self._end_extract(ring, ring.audio_extract_index)
+                    ring.audio_extract_index = None
         except (sdk.TimeoutError, sdk.ProtocolError, sdk.DeviceError, OSError, ValueError, TypeError) as exc:
             # File/decoder/configuration errors end only the audio operation;
             # they must not tear down a healthy BLE connection.
@@ -591,6 +613,8 @@ class RingWorker:
             raise
         finally:
             ring.audio_observer = None
+            # Auto-stream gap recovery starts extraction but the SDK does not
+            # end it. Save a complete file before END, even during cancellation.
             if kind == "listen" and ring.audio_extract_index is not None:
                 await self._end_extract(ring, ring.audio_extract_index)
                 ring.audio_extract_index = None

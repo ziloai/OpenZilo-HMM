@@ -12,10 +12,11 @@ import unittest
 from unittest.mock import Mock, patch
 
 import numpy as np
-from hmm_gesture import GestureBundle, GestureRecognizer, PipelineConfig, SegmentationConfig
+from hmm_gesture import GestureBundle, GestureRecognizer, PipelineConfig, SegmentationConfig, RejectionCalibration
 from hmm_gesture_studio import gui
 from hmm_gesture_studio.datasets import GestureDataset, dataset_path, load_dataset, save_dataset
 from hmm_gesture_studio.training import train_datasets
+from hmm_gesture_studio.device_history import DeviceHistory
 
 
 class Var:
@@ -47,6 +48,22 @@ class GuiControllerTests(unittest.TestCase):
         app.directory = Path(self.temp.name)
         app.events = queue.Queue()
         app.records, app.devices = {}, {}
+        app.scanned_devices = []
+        app.device_history = DeviceHistory(app.directory / "settings" / "devices.json")
+        app.preview_repetitions = []
+        app.preview_rate = None
+        app.preview_is_pending = False
+        app.recognition_origin = 0
+        app.preview_plot = Mock()
+        app.preview_choice = Mock()
+        app.preview_choice.current.return_value = -1
+        def current(index=None):
+            if index is not None:
+                app.preview_choice.current.return_value = index
+            return app.preview_choice.current.return_value
+        app.preview_choice.current.side_effect = current
+        app.preview_title = Var()
+        app.tabs, app.preview_tab = Mock(), Mock()
         app.invalid_files = []
         app.pending, app.take = [], None
         app.take_rate, app.pending_rate, app.actual_rate = None, None, 25
@@ -56,11 +73,17 @@ class GuiControllerTests(unittest.TestCase):
         app.audio_directory = app.directory / "audio"
         app.audio_files, app.remote_audio_files = {}, {}
         app.plot = Mock()
+        app.plot.next_sample = 0
+        def append_samples(samples):
+            app.plot.next_sample += len(samples)
+        app.plot.append_samples.side_effect = append_samples
+        app.plot.set_sample_rate.side_effect = lambda rate: setattr(app.plot, "next_sample", 0)
         app.audio_tree = Mock()
         app.audio_tree.insert.return_value = "audio-1"
         app.training, app.closing, app.stale = False, False, False
         app.bundle, app.recognizer, app.origin = None, None, None
         app.revision, app.count = 0, 0
+        app.evaluation_revision = None
         app.locked = [Mock()]
         app.tree = Mock()
         app.tree.get_children.return_value = []
@@ -70,13 +93,13 @@ class GuiControllerTests(unittest.TestCase):
                      "audio_list_button", "audio_download_button", "remote_audio_choice"):
             setattr(app, name, Mock())
         for name in ("status", "raw", "take_text", "result", "model_text", "dir_text", "address",
-                     "stream_text", "audio_text", "audio_dir_text"):
-            setattr(app, name, Var())
+                     "stream_text", "audio_text", "audio_dir_text", "evaluation_text", "mode_text"):
+            setattr(app, name, Var(""))
         app.name = Var("测试手势")
         app.live = Var(False)
         app.params = {key: Var(value) for key, value in dict(
             n_states="2", cutoff_hz="10", window_size="8", window_overlap="4",
-            sample_rate_hz="25", energy_threshold="1500").items()}
+            sample_rate_hz="25", energy_threshold="1500", median_kernel="5", segmentation_mode="motion").items()}
         app.log = Mock()
         app.error = Mock()
         app.executor = Mock()
@@ -168,6 +191,40 @@ class GuiControllerTests(unittest.TestCase):
         self.app.toggle_live()
         self.assertIsNone(self.app.recognizer)
         self.assertFalse(self.app.live.get())
+
+    def test_background_evaluation_preserves_existing_model(self):
+        rng = np.random.default_rng(4)
+        dataset = GestureDataset("训练", [rng.integers(-100, 100, (24, 6)) for _ in range(4)])
+        save_dataset(dataset, self.app.directory)
+        previous = self.app.bundle = Mock()
+        self.app.origin = "trained"
+        self.app.evaluate()
+        self.assertTrue(self.app.training)
+        self.app.drain_events()
+        self.assertFalse(self.app.training)
+        self.assertIs(self.app.bundle, previous)
+        self.assertFalse(self.app.stale)
+        self.assertIn("/4", self.app.evaluation_text.get())
+        self.assertIn("正样本通过率", self.app.evaluation_text.get())
+        self.app.error.assert_not_called()
+        self.app.export_button.configure.assert_called_with(state="normal")
+        self.app.invalidate("新数据")
+        self.assertIn("重新", self.app.evaluation_text.get())
+
+    def test_evaluation_failure_and_invalid_files_preserve_model(self):
+        save_dataset(GestureDataset("少", [np.ones((16, 6))] * 2), self.app.directory)
+        previous = self.app.bundle = Mock()
+        self.app.origin = "trained"
+        self.app.evaluate()
+        self.app.drain_events()
+        self.assertFalse(self.app.training)
+        self.assertIs(self.app.bundle, previous)
+        self.assertFalse(self.app.stale)
+        self.assertIn("4 次", str(self.app.error.call_args))
+        (self.app.directory / "bad.json").write_text("{broken")
+        self.app.executor.submit.reset_mock()
+        self.app.evaluate()
+        self.app.executor.submit.assert_not_called()
 
     def test_bundle_dialogs_use_simple_json_type_and_round_trip(self):
         # Cocoa cannot resolve a compound extension such as "gesture.json" to
@@ -328,7 +385,7 @@ class GuiControllerTests(unittest.TestCase):
         self.app.worker.start_audio.assert_called_once_with(self.app.audio_directory)
         self.app.handle("audio_state", {"state": "listening", "message": "等待戒指松键后推送"})
         self.app.toggle_record()
-        self.assertIsNone(self.app.take)
+        self.assertEqual(self.app.take, [])  # Passive listening no longer blocks IMU.
         self.app.stop_audio()
         self.app.worker.stop_audio.assert_called_once()
         self.assertEqual(self.app.audio_state, "stopping")
@@ -345,6 +402,137 @@ class GuiControllerTests(unittest.TestCase):
                                        "duration_s": None, "file_index": 3})
         self.assertEqual(self.app.audio_files["audio-1"], path)
         self.assertEqual(self.app.audio_tree.insert.call_args.kwargs["values"][1], "未解码")
+
+    def test_impulse_preset_uses_device_rate_and_exposes_median_off(self):
+        self.app.actual_rate = 100
+        self.app.bundle = Mock()
+        self.app.origin = "trained"
+        self.app.apply_preset("impulse")
+        pipeline = self.app.pipeline_settings()
+        segmentation = self.app.segmentation_settings(pipeline)
+        self.assertEqual((pipeline.sample_rate_hz, pipeline.cutoff_hz, pipeline.median_kernel), (100, 30, 1))
+        self.assertEqual(pipeline.filter_initialization, "steady")
+        self.assertEqual(segmentation.mode, "impulse")
+        self.assertEqual((segmentation.pre_roll, segmentation.post_roll, segmentation.max_gesture_len), (12, 28, 500))
+        self.assertEqual(segmentation.energy_threshold, 8000)
+        self.assertTrue(self.app.stale)
+        self.assertIn("训练自动裁剪", self.app.mode_text.get())
+        self.app.apply_preset("motion")
+        self.assertEqual(self.app.pipeline_settings().median_kernel, 5)
+        self.assertEqual(self.app.segmentation_settings(self.app.pipeline_settings()).max_gesture_len, 500)
+
+    def test_preset_can_use_recorded_rate_without_connected_device(self):
+        self.app.actual_rate = None
+        self.app.records["saved"] = (Path("unused"), GestureDataset("响指", [np.ones((60, 6))], 100))
+        self.app.apply_preset("impulse")
+        self.assertEqual(self.app.params["sample_rate_hz"].get(), "100")
+        self.assertEqual(self.app.params["cutoff_hz"].get(), "30")
+
+    def test_single_old_model_cannot_enable_false_positive_stream(self):
+        rng = np.random.default_rng(7)
+        data = GestureDataset("旧响指", [rng.integers(-100, 100, (24, 6)) for _ in range(3)])
+        self.app.bundle = train_datasets([data], PipelineConfig())
+        self.app.live.set(True)
+        self.app.toggle_live()
+        self.assertFalse(self.app.live.get())
+        self.assertIsNone(self.app.recognizer)
+        self.assertIn("拒识标定", str(self.app.error.call_args))
+
+    def test_connection_history_remembers_only_successes_and_survives_empty_scan(self):
+        self.app.connected = False
+        self.app.address.set("ring-uuid")
+        self.app.handle("devices", [{"name": "我的戒指", "address": "ring-uuid", "rssi": -42}])
+        self.app.connect()
+        self.assertEqual(self.app.device_history.entries, [])
+        self.app.handle("connected", {"address": "ring-uuid", "model": "Q"})
+        self.assertEqual(self.app.device_history.entries[0]["name"], "我的戒指")
+        self.app.handle("devices", [])
+        self.assertEqual(list(self.app.devices.values()), ["ring-uuid"])
+        self.assertIn("历史", next(iter(self.app.devices)))
+        self.assertEqual(DeviceHistory(self.app.device_history.path).entries[0]["address"], "ring-uuid")
+        self.app.clear_device_history()
+        self.assertEqual(self.app.device_history.entries, [])
+        self.assertTrue(self.app.connected)
+
+    def test_history_write_failure_does_not_break_successful_connection(self):
+        self.app.connecting = True
+        with patch.object(self.app.device_history, "remember", side_effect=OSError("read only")):
+            self.app.handle("connected", {"address": "ring-uuid"})
+        self.assertTrue(self.app.connected)
+        self.assertIn("BLE 已连接", self.app.status.get())
+        self.assertTrue(any("无法保存历史" in str(call) for call in self.app.log.call_args_list))
+
+    def test_each_take_previews_shared_filter_at_device_rate_and_undo_updates(self):
+        self.app.actual_rate = 50
+        self.record(value=5)
+        samples, config = self.app.preview_plot.show_recording.call_args.args
+        np.testing.assert_array_equal(samples, self.app.pending[0])
+        self.assertEqual(config.sample_rate_hz, 50)
+        self.assertEqual(config.cutoff_hz, 10)
+        self.app.tabs.select.assert_called_with(self.app.preview_tab)
+        self.record(value=6)
+        self.assertEqual(len(self.app.preview_repetitions), 2)
+        self.app.undo()
+        self.assertEqual(len(self.app.preview_repetitions), 1)
+        self.app.discard_takes()
+        self.assertEqual(self.app.preview_repetitions, [])
+        self.app.preview_plot.clear.assert_called()
+
+    def test_preview_invalid_filter_and_saved_dataset(self):
+        dataset = GestureDataset("已保存", [np.ones((20, 6))] * 2, 50)
+        self.app.records["one"] = (Path("unused"), dataset)
+        self.app.tree.selection.return_value = ["one"]
+        self.app.preview_dataset()
+        self.assertEqual(self.app.preview_rate, 50)
+        self.assertFalse(self.app.preview_is_pending)
+        self.app.params["cutoff_hz"].set("30")
+        self.app.parameters_changed()
+        self.assertIn("无法预览", self.app.preview_plot.clear.call_args.args[0])
+        self.assertEqual(self.app.preview_repetitions, dataset.repetitions)
+
+    def enable_live(self):
+        rng = np.random.default_rng(4)
+        data = GestureDataset("动作", [rng.integers(-100, 100, (24, 6)) for _ in range(3)])
+        self.app.bundle = train_datasets([data], PipelineConfig(), n_states=2)
+        # This controller test exercises positions, not a learned acceptance limit.
+        self.app.bundle.rejection = {"动作": RejectionCalibration(-1e30, 0, 12, 125)}
+        self.app.live.set(True)
+        self.app.toggle_live()
+        self.assertIsNotNone(self.app.recognizer)
+
+    def test_recognition_boxes_use_stream_origin_and_exclude_end_rest(self):
+        self.app.samples([[0] * 6] * 100)  # Plot already has data before recognition starts.
+        self.enable_live()
+        self.app.samples([[0] * 6] * 30 + [[5000, 0, 0, 0, 0, 0]] * 20 + [[0] * 6] * 30)
+        args = self.app.plot.add_recognition.call_args.args
+        self.assertEqual(args[:2], (127, 150))
+        self.assertEqual("动作", args[2])
+        self.assertIn("无相对置信度", self.app.result.get())
+        self.assertNotIn("0.80", self.app.result.get())
+        self.app.error.assert_not_called()
+
+    def test_listening_preserves_live_and_actual_transfer_pauses_then_resumes_it(self):
+        self.enable_live()
+        first = self.app.recognizer
+        self.app.start_audio()
+        self.app.handle("audio_state", {"state": "listening"})
+        self.assertIs(self.app.recognizer, first)
+        self.app.handle("stream_state", {"state": "suspended"})
+        self.app.handle("audio_state", {"state": "receiving"})
+        self.assertTrue(self.app.live.get())
+        self.assertIsNone(self.app.recognizer)
+        self.app.toggle_record()
+        self.assertIsNone(self.app.take)
+        self.app.handle("audio_state", {"state": "listening"})
+        self.app.handle("stream_state", {"state": "active", "sample_rate_hz": 25})
+        self.assertIsNotNone(self.app.recognizer)
+        self.assertIsNot(self.app.recognizer, first)
+        self.assertTrue(self.app.live.get())
+        self.assertEqual(self.app.recognition_origin, 0)
+        # A different device rate must NOT silently resume the model.
+        self.app.handle("stream_state", {"state": "active", "sample_rate_hz": 50})
+        self.assertIsNone(self.app.recognizer)
+        self.assertFalse(self.app.live.get())
 
     def test_history_download_is_explicit_and_mutually_exclusive(self):
         self.app.list_audio()
