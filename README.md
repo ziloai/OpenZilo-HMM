@@ -16,7 +16,7 @@ An official OpenZilo reference project for custom ring gestures using left-to-ri
 
 | Component | Location / import | Responsibility |
 | --- | --- | --- |
-| `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | Tkinter GUI for BLE discovery, connection, recording, data import, training, export and live testing. Depends on the runtime and official OpenZilo SDK. |
+| `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | Tkinter GUI for live six-axis charts, gesture recording/training/export, live testing, and receiving/downloading ring recordings. Depends on the runtime and official OpenZilo SDK. |
 | `hmm-gesture` | `src/hmm_gesture/` / `hmm_gesture` | Load exported gestures and classify complete segments or continuous batches. Depends only on NumPy, SciPy and hmmlearn; **no GUI, Bluetooth SDK or Studio dependency**. |
 
 ```mermaid
@@ -49,16 +49,22 @@ Tkinter comes from your Python/OS installation, not a Python package dependency.
 
 ### Recording, training and export
 
-1. Put the ring in **gesture mode**, scan/select it or enter its address, then connect. macOS typically uses a UUID. The GUI displays the actual sample rate, sensor ranges and six-axis values.
+1. Scan/select the ring or enter its address, then connect. macOS typically uses a UUID. BLE connection and IMU readiness are separate: connecting in recording mode is supported, and values resume once gesture mode starts reporting.
 2. Enter a gesture name. Start a take, perform one gesture, then stop. Record at least two repetitions (five or more recommended), then save. Takes shorter than 12 samples are rejected. Saving an existing name asks to append, requiring the same rate and preserving prior takes.
 3. Select a data directory (default `gestures/`), inspect recording counts/lengths, or import JSON and headerless CSV files. Each CSV is one repetition with six integer columns. Unsaved takes can be undone or cleared; the name is locked while they exist to avoid mixing labels.
 4. Set the sample rate to match the data, then train all datasets. Training runs in the background. Mixed rates are rejected; cutoff frequency must be below half the sample rate. Changing data/settings invalidates the previous training result.
 5. Export a **`*.gesture.json`** file containing labels, HMM parameters, preprocessing and segmentation settings. Consumers do not need to reconstruct training settings.
 6. Load an export or use the current model for live testing with a matching-rate ring. Begin at rest to establish a baseline and return to rest between gestures.
 
-There is one continuous IMU consumer; idle batches are discarded between takes. Disconnection cancels an unfinished take, while completed unsaved takes can still be saved. Shutdown attempts to stop reports and disconnect. Studio does not change device modes or hardware sample rates.
+The live chart tab shows acceleration and gyroscope traces with freeze/clear controls; freezing the display does not pause capture. There is one IMU consumer, with idle batches discarded between takes. Mode-related pauses retain BLE and retry IMU reporting when gesture mode returns; real link loss triggers reconnect with backoff. Gaps cancel unfinished takes but preserve completed ones. Manual disconnect stops retries, and shutdown cleans up reports and the link. Studio does not change device modes or hardware sample rates.
 
-BLE requires an adapter and permissions (BlueZ on Linux, terminal/IDE Bluetooth permission on macOS). No `ffmpeg` is needed. Integration targets SDK **0.5.0**, protocol **v4**, and upstream firmware documentation baseline **`V2.000.0001.0015`**; verify your hardware/firmware. The exact SDK commit is pinned in [`studio/pyproject.toml`](studio/pyproject.toml).
+BLE requires an adapter and permissions (BlueZ on Linux, terminal/IDE Bluetooth permission on macOS). Gesture features do not need `ffmpeg`; decoding ring recordings into WAV requires a system `ffmpeg` installation, with raw `.bin` preserved if decoding is unavailable. Integration targets SDK **0.5.0**, protocol **v4**, and upstream firmware documentation baseline **`V2.000.0001.0015`**; verify your hardware/firmware. The exact SDK commit is pinned in [`studio/pyproject.toml`](studio/pyproject.toml).
+
+## Ring recordings
+
+In the recording tab, select an output directory and enable automatic reception. Put the ring in recording mode, **hold its physical button to record, then release to push the file**. Studio saves the raw `.bin` and, when ffmpeg is installed, a playable WAV. Missed recordings can be listed and downloaded by index; device files are never automatically deleted.
+
+The SDK has **no host-side start/stop recording command**. GUI controls only arm/stop reception or downloading, not the ring microphone. Audio operations pause IMU requests; stop reception before returning to gesture testing. Interrupted transfers require a fresh download, and transfer progress is not a live recording timer. See the [Studio guide](studio/README.md).
 
 ## Try without hardware
 

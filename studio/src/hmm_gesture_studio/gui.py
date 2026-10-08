@@ -2,12 +2,21 @@
 """Tk desktop trainer; importing this module never initializes Tk or Bluetooth."""
 from __future__ import annotations
 
+import os
 import queue
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+
+
+# Cocoa/Tk can abort when a compound extension resolves to a nil UTType.
+# Use JSON for native filters/default extensions; .gesture.json is a filename
+# convention, while GestureBundle.load validates the actual model format.
+_BUNDLE_FILETYPES = (("手势模型包（JSON）", "*.json"),)
 
 
 class Studio:
@@ -40,6 +49,11 @@ class Studio:
         self.connected = False
         self.connecting = False
         self.actual_rate = None
+        self.imu_active = False
+        self.audio_state = "idle"
+        self.audio_directory = Path.cwd() / "audio"
+        self.audio_files = {}
+        self.remote_audio_files = {}
         self.count = 0
         self.training = False
         self.closing = False
@@ -49,10 +63,11 @@ class Studio:
         self.stale = False
         self.revision = 0
         self.locked = []
-        self.root.title("手势训练工作室")
-        self.root.geometry("1020x850")
-        self.root.minsize(980, 800)
+        self.root.title("OpenZilo 手势与录音工作室")
+        self.root.geometry("1060x860")
+        self.root.minsize(980, 760)
         self._build()
+        self.set_audio_state({"state": "idle", "message": "未开启接收"})
         self.worker.start()
         self.refresh()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -60,20 +75,34 @@ class Studio:
         self.log("手势模式：每次只录制一个完整动作；每个手势至少两次有效重复。")
         self.log("原始六轴顺序：ax, ay, az, gx, gy, gz（设备原始整数，不转换单位）。")
         self.log("置信度是模型比较指标，不是概率；训练、录制和识别必须使用相同采样率。")
+        self.log("实时曲线页可暂停显示；录音页先开启接收，再在戒指上长按录音、松开推送。")
 
     def _build(self):
         body = ttk.Frame(self.root, padding=10)
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
-        body.rowconfigure(5, weight=1)
-        work = ttk.Frame(body)
+        body.rowconfigure(1, weight=1)
+        self.tabs = ttk.Notebook(body)
+        self.tabs.grid(row=1, column=0, sticky="nsew", pady=5)
+        gesture = ttk.Frame(self.tabs, padding=6)
+        gesture.columnconfigure(0, weight=1)
+        chart = ttk.Frame(self.tabs, padding=6)
+        audio = ttk.Frame(self.tabs, padding=6)
+        self.tabs.add(gesture, text="手势录制与训练")
+        self.tabs.add(chart, text="实时六轴曲线")
+        self.tabs.add(audio, text="戒指录音")
+        from .plotting import IMUPlot
+        self.plot = IMUPlot(chart)
+        self.plot.widget.pack(fill="both", expand=True)
+        self._build_audio(audio)
+        work = ttk.Frame(gesture)
         work.grid(row=0, column=0, sticky="ew")
         self.dir_text = tk.StringVar(value=str(self.directory))
         ttk.Label(work, textvariable=self.dir_text).pack(side="left", fill="x", expand=True)
         self.button(work, "选择数据目录", self.choose_directory, lock=True).pack(side="right")
 
-        device = ttk.LabelFrame(body, text="1. 设备连接", padding=6)
-        device.grid(row=1, column=0, sticky="ew", pady=5)
+        device = ttk.LabelFrame(body, text="设备连接（切换模式不会主动断开 BLE）", padding=6)
+        device.grid(row=0, column=0, sticky="ew", pady=5)
         self.button(device, "扫描", lambda: self.request(self.worker.scan)).grid(row=0, column=0)
         self.device_choice = ttk.Combobox(device, state="readonly", width=32)
         self.device_choice.grid(row=0, column=1, padx=5)
@@ -87,9 +116,12 @@ class Studio:
         ttk.Label(device, textvariable=self.status).grid(row=1, column=0, columnspan=5, sticky="w")
         self.raw = tk.StringVar(value="ax / ay / az / gx / gy / gz：—；样本数：0")
         ttk.Label(device, textvariable=self.raw).grid(row=2, column=0, columnspan=5, sticky="w")
+        self.stream_text = tk.StringVar(value="IMU 未就绪；连接后自动等待手势模式")
+        ttk.Label(device, textvariable=self.stream_text).grid(row=3, column=0, columnspan=4, sticky="w")
+        self.button(device, "重试 IMU 上报", lambda: self.request(self.worker.retry_imu)).grid(row=3, column=4)
 
-        recording = ttk.LabelFrame(body, text="2. 录制数据（每次至少 12 个样本）", padding=6)
-        recording.grid(row=2, column=0, sticky="ew", pady=5)
+        recording = ttk.LabelFrame(gesture, text="录制数据（每次至少 12 个样本）", padding=6)
+        recording.grid(row=1, column=0, sticky="ew", pady=5)
         ttk.Label(recording, text="手势名称").grid(row=0, column=0)
         self.name = tk.StringVar()
         self.name_entry = ttk.Entry(recording, textvariable=self.name, width=24)
@@ -104,8 +136,8 @@ class Studio:
         self.take_text = tk.StringVar(value="未保存：0 次")
         ttk.Label(recording, textvariable=self.take_text).grid(row=1, column=0, columnspan=5, sticky="w")
 
-        data = ttk.LabelFrame(body, text="3. 数据集（训练使用列表中全部有效 JSON）", padding=6)
-        data.grid(row=3, column=0, sticky="ew", pady=5)
+        data = ttk.LabelFrame(gesture, text="数据集（训练使用列表中全部有效 JSON）", padding=6)
+        data.grid(row=2, column=0, sticky="ew", pady=5)
         data.columnconfigure(0, weight=1)
         self.tree = ttk.Treeview(data, columns=("name", "reps", "rate", "lengths"),
                                  show="headings", height=5)
@@ -124,8 +156,8 @@ class Studio:
         self.button(actions, "导入 CSV（多选）", self.import_csv, lock=True).pack(side="left")
         ttk.Label(actions, text="CSV：无表头，六列逗号分隔；每文件一次重复").pack(side="left", padx=8)
 
-        model = ttk.LabelFrame(body, text="4. 训练与实时试识别", padding=6)
-        model.grid(row=4, column=0, sticky="ew", pady=5)
+        model = ttk.LabelFrame(gesture, text="训练与实时试识别", padding=6)
+        model.grid(row=3, column=0, sticky="ew", pady=5)
         self.params = {}
         definitions = [("n_states", "状态数", "6"), ("cutoff_hz", "低通 Hz", "10"),
                        ("window_size", "窗口", "8"), ("window_overlap", "重叠", "4"),
@@ -159,12 +191,128 @@ class Studio:
         ttk.Label(model, textvariable=self.result).pack(anchor="w")
 
         logs = ttk.LabelFrame(body, text="日志", padding=4)
-        logs.grid(row=5, column=0, sticky="nsew", pady=5)
-        self.log_widget = tk.Text(logs, height=8, state="disabled", wrap="word")
+        logs.grid(row=2, column=0, sticky="nsew", pady=5)
+        self.log_widget = tk.Text(logs, height=5, state="disabled", wrap="word")
         self.log_widget.pack(side="left", fill="both", expand=True)
         bar = ttk.Scrollbar(logs, command=self.log_widget.yview)
         bar.pack(side="right", fill="y")
         self.log_widget.configure(yscrollcommand=bar.set)
+
+    def _build_audio(self, parent):
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(4, weight=1)
+        ttk.Label(parent, text="先开启接收，再将戒指切到录音模式：长按戒指按键录音，松开后自动推送文件。\n"
+                  "SDK 不支持电脑开始/停止录音；本页只控制接收/下载。接收期间暂停 IMU，停止接收后自动恢复探测。\n"
+                  "原始 .bin 始终保留；安装 ffmpeg 后同时转为可播放 WAV。若漏收或中断，可从历史录音重新下载。",
+                  wraplength=900).grid(row=0, column=0, sticky="w", pady=8)
+        directory = ttk.Frame(parent)
+        directory.grid(row=1, column=0, sticky="ew", pady=6)
+        self.audio_dir_text = tk.StringVar(value=str(self.audio_directory))
+        ttk.Label(directory, textvariable=self.audio_dir_text).pack(side="left", fill="x", expand=True)
+        self.audio_dir_button = self.button(directory, "选择录音目录", self.choose_audio_directory)
+        self.audio_dir_button.pack(side="right")
+        controls = ttk.Frame(parent)
+        controls.grid(row=2, column=0, sticky="ew", pady=6)
+        self.audio_start_button = self.button(controls, "开启自动接收", self.start_audio)
+        self.audio_start_button.pack(side="left")
+        self.audio_stop_button = self.button(controls, "停止接收 / 下载", self.stop_audio)
+        self.audio_stop_button.pack(side="left", padx=6)
+        self.audio_stop_button.configure(state="disabled")
+        self.audio_text = tk.StringVar(value="未开启接收")
+        ttk.Label(controls, textvariable=self.audio_text, wraplength=630).pack(side="left", padx=10)
+        remote = ttk.Frame(parent)
+        remote.grid(row=3, column=0, sticky="ew", pady=6)
+        self.audio_list_button = self.button(remote, "查询戒指历史录音", self.list_audio)
+        self.audio_list_button.pack(side="left")
+        self.remote_audio_choice = ttk.Combobox(remote, state="readonly", width=35)
+        self.remote_audio_choice.pack(side="left", padx=6)
+        self.audio_download_button = self.button(remote, "下载选中录音", self.download_audio)
+        self.audio_download_button.pack(side="left")
+        self.audio_tree = ttk.Treeview(parent, columns=("file", "duration", "size"), show="headings")
+        for key, label, width in (("file", "本次会话保存的文件", 500), ("duration", "音频时长", 100), ("size", "大小", 100)):
+            self.audio_tree.heading(key, text=label)
+            self.audio_tree.column(key, width=width)
+        self.audio_tree.grid(row=4, column=0, sticky="nsew", pady=8)
+        bar = ttk.Scrollbar(parent, command=self.audio_tree.yview)
+        bar.grid(row=4, column=1, sticky="ns")
+        self.audio_tree.configure(yscrollcommand=bar.set)
+        actions = ttk.Frame(parent)
+        actions.grid(row=5, column=0, sticky="w")
+        self.button(actions, "打开选中文件", self.open_audio_file).pack(side="left")
+        self.button(actions, "打开录音目录", lambda: self.open_path(self.audio_directory)).pack(side="left", padx=6)
+
+    def choose_audio_directory(self):
+        if self.audio_state != "idle":
+            self.error("接收、下载或保存期间不能更改目录。")
+            return
+        path = filedialog.askdirectory(parent=self.root, initialdir=str(self.audio_directory.parent))
+        if path:
+            self.audio_directory = Path(path)
+            self.audio_dir_text.set(str(self.audio_directory))
+
+    def start_audio(self):
+        if not self.connected or self.audio_state != "idle":
+            self.error("请先连接戒指，并等待上次接收或保存结束。")
+            return
+        if self.take is not None:
+            self.error("请先停止本次手势录制，再开启录音接收。")
+            return
+        self.stop_live()
+        self.set_audio_state({"state": "starting", "message": "正在暂停 IMU 并开启接收…"})
+        if not self.request(lambda: self.worker.start_audio(self.audio_directory)):
+            self.set_audio_state({"state": "idle", "message": "开启接收失败"})
+
+    def stop_audio(self):
+        if self.audio_state not in {"idle", "saving", "stopping"}:
+            if self.audio_state in {"receiving", "downloading"} and not messagebox.askyesno(
+                    "中断音频传输？", "未接收完整的文件不会保存。之后可从戒指历史录音重新下载。", parent=self.root):
+                return
+            self.set_audio_state({"state": "stopping", "message": "正在停止电脑端接收（不控制戒指录音）…"})
+            self.request(self.worker.stop_audio)
+
+    def list_audio(self):
+        if not self.connected or self.audio_state != "idle" or self.take is not None:
+            self.error("请先连接戒指，停止手势录制和音频接收/下载后再查询。")
+            return
+        self.stop_live()
+        self.set_audio_state({"state": "listing", "message": "正在查询历史录音…"})
+        if not self.request(self.worker.list_audio):
+            self.set_audio_state({"state": "idle", "message": "查询请求失败"})
+
+    def download_audio(self):
+        selected = self.remote_audio_choice.get()
+        if not self.connected or self.audio_state != "idle" or self.take is not None or selected not in self.remote_audio_files:
+            self.error("请先查询并选择历史录音，停止当前手势录制/音频接收后再下载。")
+            return
+        self.stop_live()
+        self.set_audio_state({"state": "downloading", "message": "正在准备下载…"})
+        if not self.request(lambda: self.worker.download_audio(self.remote_audio_files[selected], self.audio_directory)):
+            self.set_audio_state({"state": "idle", "message": "下载请求失败"})
+
+    def set_audio_state(self, payload):
+        self.audio_state = payload["state"]
+        self.audio_text.set(payload.get("message", self.audio_state))
+        idle = self.audio_state == "idle"
+        self.audio_start_button.configure(state="normal" if idle and self.connected else "disabled")
+        self.audio_stop_button.configure(state="normal" if self.audio_state not in {"idle", "saving", "stopping"} else "disabled")
+        self.audio_dir_button.configure(state="normal" if idle else "disabled")
+        self.audio_list_button.configure(state="normal" if idle and self.connected else "disabled")
+        self.audio_download_button.configure(state="normal" if idle and self.connected and self.remote_audio_files else "disabled")
+
+    def open_path(self, path):
+        try:
+            path = Path(path).resolve(strict=True)
+            if sys.platform == "win32":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+        except (OSError, ValueError) as exc:
+            self.error(str(exc))
+
+    def open_audio_file(self):
+        selection = self.audio_tree.selection()
+        if selection:
+            self.open_path(self.audio_files[selection[0]])
 
     def button(self, parent, text, command, lock=False):
         button = ttk.Button(parent, text=text, command=command)
@@ -285,6 +433,10 @@ class Studio:
             self.status.set("连接失败")
 
     def disconnect(self):
+        if self.audio_state != "idle" and not messagebox.askyesno(
+                "音频接收尚未结束", "断开将停止电脑接收/下载，不控制戒指录音。未完整接收的文件需之后重新下载。继续？", parent=self.root):
+            return
+        self.set_stream_state({"state": "waiting", "message": "IMU 已停止"})
         self.cancel_take()
         self.stop_live()
         self.connected = False
@@ -311,8 +463,8 @@ class Studio:
                     self.error(str(exc))
             self.update_takes()
             return
-        if not self.connected or not self.name.get().strip():
-            self.error("请连接设备并输入手势名称。")
+        if not self.connected or not self.imu_active or self.audio_state != "idle" or not self.name.get().strip():
+            self.error("请输入手势名称，等待 IMU 恢复上报；录音期间不能录制手势。")
             return
         if self.pending and not self.same_rate(self.pending_rate, self.actual_rate):
             self.error("未保存录制与当前设备采样率不一致，请先保存或撤销。")
@@ -457,24 +609,24 @@ class Studio:
         self.log(self.model_text.get())
 
     def load_bundle(self):
-        path = filedialog.askopenfilename(parent=self.root, filetypes=[("手势模型包", "*.gesture.json"), ("JSON", "*.json")])
-        if path:
-            try:
+        try:
+            path = filedialog.askopenfilename(parent=self.root, filetypes=_BUNDLE_FILETYPES)
+            if path:
                 self.set_bundle(GestureBundle.load(path), "imported", f"已加载 {Path(path).name}（独立于当前训练数据）")
-            except Exception as exc:
-                self.error(str(exc))
+        except Exception as exc:
+            self.error(str(exc))
 
     def export_bundle(self):
         if self.bundle is None or self.stale or self.training:
             return
-        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".gesture.json",
-                                           filetypes=[("手势模型包", "*.gesture.json")])
-        if path:
-            try:
+        try:
+            path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".json",
+                                               initialfile="model.gesture.json", filetypes=_BUNDLE_FILETYPES)
+            if path:
                 self.bundle.save(path)
                 self.log(f"模型包已导出：{path}")
-            except Exception as exc:
-                self.error(str(exc))
+        except Exception as exc:
+            self.error(str(exc))
 
     def stop_live(self):
         self.live.set(False)
@@ -490,8 +642,8 @@ class Studio:
         try:
             if self.training or self.bundle is None or self.stale:
                 raise ValueError("请先训练有效模型或加载模型包。")
-            if not self.connected:
-                raise ValueError("请先连接设备。")
+            if not self.connected or not self.imu_active or self.audio_state != "idle":
+                raise ValueError("请先连接设备并等待 IMU 恢复上报；录音期间不能试识别。")
             if not self.same_rate(self.actual_rate, self.bundle.pipeline.sample_rate_hz):
                 raise ValueError(f"采样率不匹配：设备 {self.actual_rate:g} Hz，模型 {self.bundle.pipeline.sample_rate_hz:g} Hz。")
             self.recognizer = GestureRecognizer(self.bundle)
@@ -501,8 +653,9 @@ class Studio:
             self.error(str(exc))
 
     def samples(self, payload):
-        if not self.connected or not payload:
+        if not self.connected or not self.imu_active or not payload:
             return
+        self.plot.append_samples(payload)
         self.count += len(payload)
         self.raw.set(f"ax / ay / az / gx / gy / gz：{' / '.join(map(str, payload[-1]))}；样本数：{self.count}")
         if self.take is not None:
@@ -534,7 +687,30 @@ class Studio:
         if self.closing:
             return
         self.drain_events()
+        self.plot.redraw()
         self.root.after(50, self.poll)
+
+    def set_stream_state(self, payload):
+        active = payload["state"] == "active"
+        message = payload.get("message", "IMU 正常上报" if active else "IMU 暂停，等待手势模式")
+        if active:
+            rate = float(payload["sample_rate_hz"])
+            if not self.imu_active or not self.same_rate(self.actual_rate, rate):
+                self.plot.set_sample_rate(rate)
+                if self.recognizer is not None:
+                    self.recognizer.reset()
+            self.actual_rate = rate
+            message = f"{message}；{rate:g} Hz"
+            if payload.get("accel_range_g") is not None:
+                message += f"；加速度 ±{payload['accel_range_g']} g，陀螺仪 ±{payload['gyro_range_dps']} °/s"
+        else:
+            self.actual_rate = None
+            self.cancel_take()
+            self.stop_live()
+            self.raw.set("ax / ay / az / gx / gy / gz：—（无新数据，未断言 BLE 断开）")
+        self.imu_active = active
+        self.stream_text.set(message)
+        self.plot.set_status(message)
 
     def handle(self, event, payload):
         if event == "samples":
@@ -548,17 +724,48 @@ class Studio:
                 self.request(self.worker.disconnect)
                 return
             self.connected, self.connecting = True, False
-            self.actual_rate = float(payload["sample_rate_hz"])
+            self.set_stream_state({"state": "waiting", "message": "BLE 已连接，正在等待新的 IMU 数据…"})
             self.count = 0
-            self.status.set(f"已连接 {payload['address']}；实际 {self.actual_rate:g} Hz；"
-                            f"加速度量程 ±{payload['accel_range_g']} g；陀螺仪量程 ±{payload['gyro_range_dps']} °/s")
+            self.plot.clear()
+            self.remote_audio_files = {}
+            self.remote_audio_choice.configure(values=[])
+            self.remote_audio_choice.set("")
+            self.status.set(f"BLE 已连接 {payload['address']}；{payload.get('model', '')} "
+                            f"{payload.get('firmware_version', '')}")
+            self.set_audio_state({"state": self.audio_state, "message": self.audio_text.get()})
             self.log(self.status.get())
+        elif event == "stream_state":
+            self.set_stream_state(payload)
+        elif event == "reconnecting":
+            self.connected, self.connecting = False, True
+            self.set_stream_state({"state": "waiting", "message": "连接中断，正在自动重连"})
+            self.status.set(payload["message"])
+            self.set_audio_state({"state": self.audio_state, "message": self.audio_text.get()})
+            self.log(payload["message"])
         elif event == "disconnected":
             self.connected = self.connecting = False
-            self.actual_rate = None
-            self.cancel_take()
-            self.stop_live()
-            self.status.set("已断开；未完成录制已取消")
+            self.set_stream_state({"state": "waiting", "message": "IMU 未连接"})
+            self.set_audio_state({"state": self.audio_state, "message": self.audio_text.get()})
+            self.status.set("已断开；未完成的手势录制已取消")
+        elif event == "audio_state":
+            self.set_audio_state(payload)
+            self.log(payload.get("message", payload["state"]))
+        elif event == "audio_progress":
+            total = payload.get("total")
+            suffix = f" / {total / 1024:.1f} KiB" if total else ""
+            self.audio_text.set(f"正在接收音频文件：{payload['bytes'] / 1024:.1f} KiB{suffix}（不是录音计时）")
+        elif event == "audio_files":
+            self.remote_audio_files = {f"录音索引 {entry['file_index']}": entry['file_index'] for entry in payload}
+            self.remote_audio_choice.configure(values=list(self.remote_audio_files))
+            self.remote_audio_choice.set(next(iter(self.remote_audio_files), ""))
+            self.log(f"戒指中有 {len(payload)} 个录音文件；不会自动删除设备文件。")
+        elif event == "audio_saved":
+            path = Path(payload["path"])
+            duration = payload.get("duration_s")
+            item = self.audio_tree.insert("", "end", values=(path.name, f"{duration:.1f} s" if duration is not None else "未解码",
+                                                           f"{path.stat().st_size / 1024:.1f} KiB"))
+            self.audio_files[item] = path
+            self.log(f"录音已保存：{path}；原始文件：{payload['raw_path']}")
         elif event in ("warning", "error", "progress"):
             self.log(f"{event}：{payload}")
         elif event == "trained":
@@ -576,6 +783,9 @@ class Studio:
         if self.closing or not self.confirm_discard():
             return
         if self.training and not messagebox.askyesno("训练尚未完成", "关闭窗口将放弃本次训练结果；后台计算可能稍后才结束。继续？", parent=self.root):
+            return
+        if self.audio_state != "idle" and not messagebox.askyesno(
+                "音频接收尚未结束", "退出将停止电脑接收/下载，不控制戒指录音。完整收到的音频会继续保存；未完整文件需重新下载。继续？", parent=self.root):
             return
         self.closing = True
         self.cancel_take()

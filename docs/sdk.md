@@ -16,7 +16,7 @@ uv run --locked --all-packages python -m openzilo scan --timeout 10
 
 Only the training platform and legacy ring CLIs depend on the SDK. The standalone `hmm-gesture` package takes application-provided IMU arrays and does not import OpenZilo or BLE. See [the two-component architecture](architecture.md).
 
-BLE is supplied by the SDK's `bleak` dependency. `ffmpeg` is not needed for IMU data, training, or recognition.
+BLE is supplied by the SDK's `bleak` dependency. `ffmpeg` is not needed for IMU data, training, or recognition. Studio uses system ffmpeg to decode ring Speex recordings to WAV, preserving raw `.bin` files even when decoding fails.
 
 Use the upstream documents for protocol details rather than keeping another copy here:
 
@@ -82,6 +82,14 @@ Important boundaries:
 - Stop reporting on normal exit or cancellation when still connected. Disconnect/protocol failures should surface, not be swallowed in a retry loop.
 - Device-side `wait_sensor_gesture_event()` (`0x0702`) is separate from the host-side HMM pipeline in this repository. No model-upload API is used or provided here.
 
+### Studio mode recovery and recordings
+
+Studio now manages BLE independently of `open_ring_stream`, which is retained for legacy CLIs. `DEVICE_BUSY` or an IMU timeout is not evidence of BLE disconnection. Studio waits/retries reporting while keeping the link, verifies recovery with fresh data rather than an ACK alone, and reconnects with backoff on actual transport loss. Manual disconnect cancels retries. Reissuing START resets sensor sequence numbers, so it is a recovery operation, not a continuous heartbeat.
+
+The SDK/firmware contract is **physical-button recording**: hold the ring button in recording mode, then release to save and push `0x0505` frames. There is no host start/stop recording command. `receive_auto_audio_file` assembles a pushed file; `get_audio_file_count` enumerates indices; `download_audio_file` retrieves missed files. `get_audio_file_info` starts extraction, so it is not used merely to populate a list. Listening/download operations are mutually exclusive and pause IMU commands. Stopping reception does not stop the ring microphone; incomplete transfers are not reported as saved and can be downloaded again.
+
+The SDK has no request/write lock. Studio serializes sends and cleans up extraction on cancellation. GUI state distinguishes listening, receiving, saving and disconnected states. Audio conversion uses SDK parsing/container helpers plus a bounded ffmpeg subprocess, off the BLE/Tk threads. Raw files are saved before decoding with unique filenames; durations come from decoded WAV headers. These are application recovery policies; mode transitions and reconnect timing still require hardware validation.
+
 ### Updating the dependency later
 
 Review upstream public exports and release changes, change the full commit hash in `studio/pyproject.toml`, and update the SDK version/baseline in both READMEs and this document. Run `uv lock`, commit the updated `uv.lock` alongside the manifest, sync with `uv sync --locked --all-packages`, and run `uv run --locked --all-packages python -m unittest discover -s tests -v`. Then validate scan, recording, recognition, cancellation, and disconnection on a real ring. Do not replace the pinned revision with a moving branch for a release.
@@ -96,7 +104,7 @@ This project and the SDK use MPL-2.0; see the root [LICENSE](../LICENSE). The RE
 
 仅训练平台及旧戒指命令行依赖 SDK；独立的 `hmm-gesture` 包只接收应用提供的 IMU 数据，不导入 OpenZilo 或 BLE。见[两部分架构](architecture.md)。
 
-Bleak 由 SDK 自动安装。本项目不处理音频，因此不需要 `ffmpeg`。上文链接均指向固定提交的 SDK 手册、协议、架构和公开 API，不在本仓库重复维护一份可能过时的协议文档。上游固件说明基线为 `V2.000.0001.0015`，其他固件需要真机确认。
+Bleak 由 SDK 自动安装。手势功能不需要 `ffmpeg`；Studio 戒指录音转 WAV 需要系统 `ffmpeg`，缺失或解码失败时仍保留原始 `.bin`。上文链接均指向固定提交的 SDK 手册、协议、架构和公开 API，不在本仓库重复维护一份可能过时的协议文档。上游固件说明基线为 `V2.000.0001.0015`，其他固件需要真机确认。
 
 ### 从旧 SDK 迁移
 
@@ -126,6 +134,14 @@ Bleak 由 SDK 自动安装。本项目不处理音频，因此不需要 `ffmpeg`
 - 同一连接只用一个消费者读取 `wait_sensor_data()`；两次录制之间也要持续消费，避免积压旧数据。
 - 正常退出或取消时，若仍连接，应停止上报；不要把断连和协议异常当成普通超时无限重试。
 - 戒指端 `wait_sensor_gesture_event()`（`0x0702`）与本仓库的电脑端 HMM 是两条独立链路，本项目不使用也不提供模型上传接口。
+
+### Studio 模式恢复与录音
+
+Studio 的 BLE 生命周期已与 IMU 上报解耦；`open_ring_stream` 保留给旧命令行。`DEVICE_BUSY` 或收数超时只说明 IMU 暂不可用，不直接断开 BLE；恢复时重新开启上报并等待新数据。真正的传输断连才退避重连，手动断开停止重试。START 会重置序号，因此不作为连续心跳。单击事件不是模式查询结果。
+
+戒指录音必须在录音模式下**长按物理按键，松开后保存并推送**。SDK 没有电脑端开始/停止录音命令。Studio 用 `receive_auto_audio_file` 接收，用 `get_audio_file_count` 列索引，用 `download_audio_file` 下载历史录音；`get_audio_file_info` 会启动提取，不能单纯用于列表展示。音频接收/下载互斥，期间暂停 IMU 请求；停止电脑接收并不能停止戒指麦克风，未完整传输的文件需重新下载。
+
+SDK 自身没有请求/写锁，Studio 负责串行发送、取消时结束提取、断连清理。先以唯一文件名保存原始数据，再在后台用 SDK 的解析/封装功能及限时 ffmpeg 解码；WAV 时长由文件头计算，不以传输用时冒充录音时长。真实模式切换与重连行为仍须真机验证。
 
 ### 后续升级
 

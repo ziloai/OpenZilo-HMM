@@ -17,10 +17,17 @@ hmm_gesture_studio                     hmm_gesture
     ├──── training.py ────────────────> preprocessing.py
     │          └─────────────────────> bundle.py
     │                                       │
-    └──── device.py                    recognizer.py
-           └── ring_stream.py              └── segmentation.py
-                 └── OpenZilo SDK
+    ├──── plotting.py                 recognizer.py
+    └──── device.py                        └── segmentation.py
+           ├── audio.py
+           └── OpenZilo SDK
+
+legacy CLI ── ring_stream.py ── OpenZilo SDK
 ```
+
+Studio 的 `device.py` 把 BLE 连接与 IMU 就绪状态分开。只有收到新 IMU 批次才报告可采集；停报或 DEVICE_BUSY 保留 BLE，等待重试，实际断连才退避重连。数据间断会通知 GUI 取消未完成手势并重置分段。原 `ring_stream.py` 继续服务旧命令行，不改变其一次性采集语义。
+
+音频接收、列表查询、下载与 IMU 由同一业务消费者串行处理，SDK 请求/分片写入额外加锁；取消不会中断半条发送。录音由戒指长按/松开触发，Studio 无远程录音控制接口。`audio.py` 先保存完整原始文件，再用有时限的外部 ffmpeg 转 WAV；解码失败不丢原数据。`plotting.py` 只在 Tk 主线程绘制有界滚动数据，不新增运行时依赖，也不影响训练/推理包边界。详情见 [Studio 指南](../studio/README.md)。
 
 ## uv 工作区与依赖管理
 
