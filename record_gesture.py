@@ -21,16 +21,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 import threading
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import openzilo as sdk
 
 from ring_stream import open_ring_stream
+from hmm_gesture.preprocessing import validate_samples
+from hmm_gesture_studio.datasets import GestureDataset, save_dataset
 
 # Two feature windows with the default window_size=8, overlap=4.
 MIN_RECORDING_SAMPLES = 12
@@ -38,12 +38,10 @@ MIN_RECORDING_SAMPLES = 12
 
 def load_csv(path: Path) -> np.ndarray:
     """读取 CSV 文件，每行 6 个整数（加速度 xyz + 陀螺仪 xyz）。"""
-    data = np.loadtxt(path, delimiter=",", dtype=np.int16)
-    if data.ndim == 1:
-        data = data.reshape(1, -1)
-    if data.shape[1] != 6:
-        raise ValueError(f"{path}: 每行应有 6 列 (ax,ay,az,gx,gy,gz)，实际 {data.shape[1]} 列")
-    return data
+    data = validate_samples(np.loadtxt(path, delimiter=",", ndmin=2))
+    if not np.equal(data, np.rint(data)).all():
+        raise ValueError(f"{path}: CSV must contain raw integer IMU values")
+    return data.astype(np.int16)
 
 
 def read_interactive_rep(rep_index: int) -> np.ndarray:
@@ -160,27 +158,7 @@ async def record_from_ring(address: str, name: str, reps: int, output_dir: Path)
 def save_gesture(name: str, repetitions: list[np.ndarray], output_dir: Path,
                  sample_rate_hz: float = 25) -> Path:
     """保存手势数据，BLE 模式使用设备返回的实际采样率。"""
-    if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0:
-        raise ValueError("Sample rate must be finite and positive")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    data = {
-        "name": name,
-        "created_at": datetime.now().astimezone().isoformat(),
-        "sample_rate_hz": sample_rate_hz,
-        "num_repetitions": len(repetitions),
-        "repetitions": [
-            {
-                "index": i,
-                "num_samples": len(rep),
-                "data": rep.tolist(),
-            }
-            for i, rep in enumerate(repetitions)
-        ],
-    }
-    safe_name = name.replace("/", "_").replace("\\", "_")[:64]
-    path = output_dir / f"{safe_name}.json"
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return save_dataset(GestureDataset(name, repetitions, sample_rate_hz), output_dir)
 
 
 def main():

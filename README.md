@@ -2,233 +2,161 @@
   <a href="https://openzilo.com"><img src="docs/assets/openzilo-hero.png" alt="OpenZilo ring" width="960"></a>
 </p>
 
-<h1 align="center">OpenZilo HMM Gesture Recognition</h1>
+<h1 align="center">OpenZilo Gesture Studio & Python Recognition</h1>
 
-<p align="center">Record ring gestures. Train your own models. Recognize them with Python.</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
-  <a href="https://github.com/ziloai/OpenZilo"><img src="https://img.shields.io/badge/SDK-OpenZilo%200.5.0-555555" alt="OpenZilo SDK 0.5.0"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-555555" alt="MPL-2.0"></a>
-</p>
+<p align="center">Connect a ring, record and train gestures in a desktop GUI, then export them to your Python application.</p>
 
 <p align="center">
-  <a href="https://openzilo.com">Website</a> ·
-  <a href="https://openzilo.com/buy">Get the Kit</a> ·
-  <a href="https://github.com/ziloai/OpenZilo">Python SDK</a> ·
-  <a href="https://github.com/ziloai/OpenZilo-HMM/issues">Issues</a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="README.zh-CN.md">简体中文</a>
+  <a href="README.zh-CN.md">中文</a> · <a href="studio/README.md">Studio guide</a> ·
+  <a href="docs/architecture.md">Architecture & export format</a> · <a href="docs/sdk.md">SDK integration</a> ·
+  <a href="LICENSE">MPL-2.0</a>
 </p>
 
-An official OpenZilo reference project for training custom ring gestures with Hidden Markov Models (HMMs). It uses the [OpenZilo Python SDK](https://github.com/ziloai/OpenZilo) to collect six-axis IMU data over Bluetooth Low Energy, then trains and runs gesture classifiers on your computer.
+An official OpenZilo reference project for custom ring gestures using left-to-right Gaussian HMMs. There are two **separately installable distributions**:
 
-OpenZilo is an open development platform for wearable interaction and **ComBodied AI**. Use this project as a starting point for gesture-driven agent commands, desktop shortcuts, robotics, and experimental interfaces.
-
-> Training and recognition run on the **host computer**. This project does not flash firmware, upload models to the ring, or replace its built-in `0x0702` gesture recognition. It consumes raw `0x0605` IMU batches.
-
-## What is included?
-
-- BLE recording, CSV import, and terminal data entry.
-- One left-to-right Gaussian HMM per gesture.
-- Offline classification and continuous, motion-segmented BLE recognition.
-- Six example datasets and pretrained models: finger snap, wrist flick, up, down, left, and right.
-- Hardware-free tests for the SDK integration and offline pipeline.
+| Component | Location / import | Responsibility |
+| --- | --- | --- |
+| `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | Tkinter GUI for BLE discovery, connection, recording, data import, training, export and live testing. Depends on the runtime and official OpenZilo SDK. |
+| `hmm-gesture` | `src/hmm_gesture/` / `hmm_gesture` | Load exported gestures and classify complete segments or continuous batches. Depends only on NumPy, SciPy and hmmlearn; **no GUI, Bluetooth SDK or Studio dependency**. |
 
 ```mermaid
 flowchart LR
-    ring["OpenZilo ring"] --> sdk["OpenZilo SDK"]
-    sdk --> recordings["IMU recordings"]
-    files["CSV / JSON"] --> recordings
-    recordings --> training["HMM training"]
-    training -->|Trained models| recognition["Python recognition"]
-    sdk -->|Live BLE| recognition
-    recordings -->|Recorded data| recognition
+    ring[OpenZilo ring] -->|Raw six-axis BLE data| studio[Training GUI]
+    data[JSON / CSV recordings] --> studio
+    studio -->|Train and export| bundle["*.gesture.json"]
+    bundle --> runtime[Python recognition package]
+    input[Application IMU data] --> runtime
+    runtime --> output[Gesture name / scores / confidence]
 ```
 
-## Development kits and compatibility
+> Training and recognition run on the **host computer**. This project does not flash firmware, upload models to the ring, or replace device-side `0x0702` recognition. It consumes raw `0x0605` IMU reports.
 
-Both **OpenZilo Q** (voice + gesture) and **OpenZilo X** (voice + gesture + physiological sensing) include an IMU. This project uses only the accelerometer and gyroscope; it does not use microphones or PPG.
+## Install and launch Studio
 
-The integration targets SDK **0.5.0**, protocol **v4**, and the upstream documentation's firmware baseline **`V2.000.0001.0015`**. Confirm IMU streaming support on your own kit and firmware; this is not a claim that every hardware revision has been tested.
-
-## Quick start
-
-### 1. Install
-
-Use **Python 3.10+** (3.11 or 3.12 recommended) and Git. Clone the repository and install:
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Git and a Python installation with Tkinter. `.python-version` selects Python **3.12** for development; both packages still support Python 3.10+.
 
 ```bash
 git clone https://github.com/ziloai/OpenZilo-HMM.git
 cd OpenZilo-HMM
-python -m venv .venv
-source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+uv sync --locked --all-packages
+uv run --locked --all-packages hmm-gesture-studio
+# Alternative: uv run --locked --package hmm-gesture-studio python -m hmm_gesture_studio
 ```
 
-Requirements install NumPy, SciPy, hmmlearn, and the official OpenZilo SDK, which supplies Bleak. The SDK is pinned to upstream commit [`e9a861d`](https://github.com/ziloai/OpenZilo/commit/e9a861dd5c82a154fba0f1bafb628cd04fbd9555) rather than a moving branch. No local SDK copy or `sys.path` setup is needed.
+The two packages form one uv workspace, sharing `.venv/` and the checked-in `uv.lock`. `--all-packages` installs both; no manual environment activation is needed. `--locked` verifies that dependency declarations match the lockfile. Dependencies are maintained in `pyproject.toml`, not a separate requirements file.
 
-Live use also needs a BLE adapter and Bluetooth permissions. Linux needs BlueZ; on macOS, allow Bluetooth access for the terminal or IDE. Offline training and recognition require no ring, Bluetooth connection, or `ffmpeg`.
+Tkinter comes from your Python/OS installation, not a Python package dependency. On Debian/Ubuntu install `python3-tk`; Homebrew Python requires the matching `python-tk` version. If necessary, select a Tk-enabled interpreter with `uv sync --locked --all-packages --python /path/to/python3.12`. Run the GUI in a graphical desktop session. The interface currently uses Chinese labels.
 
-### 2. Try it without hardware
+### Recording, training and export
+
+1. Put the ring in **gesture mode**, scan/select it or enter its address, then connect. macOS typically uses a UUID. The GUI displays the actual sample rate, sensor ranges and six-axis values.
+2. Enter a gesture name. Start a take, perform one gesture, then stop. Record at least two repetitions (five or more recommended), then save. Takes shorter than 12 samples are rejected. Saving an existing name asks to append, requiring the same rate and preserving prior takes.
+3. Select a data directory (default `gestures/`), inspect recording counts/lengths, or import JSON and headerless CSV files. Each CSV is one repetition with six integer columns. Unsaved takes can be undone or cleared; the name is locked while they exist to avoid mixing labels.
+4. Set the sample rate to match the data, then train all datasets. Training runs in the background. Mixed rates are rejected; cutoff frequency must be below half the sample rate. Changing data/settings invalidates the previous training result.
+5. Export a **`*.gesture.json`** file containing labels, HMM parameters, preprocessing and segmentation settings. Consumers do not need to reconstruct training settings.
+6. Load an export or use the current model for live testing with a matching-rate ring. Begin at rest to establish a baseline and return to rest between gestures.
+
+There is one continuous IMU consumer; idle batches are discarded between takes. Disconnection cancels an unfinished take, while completed unsaved takes can still be saved. Shutdown attempts to stop reports and disconnect. Studio does not change device modes or hardware sample rates.
+
+BLE requires an adapter and permissions (BlueZ on Linux, terminal/IDE Bluetooth permission on macOS). No `ffmpeg` is needed. Integration targets SDK **0.5.0**, protocol **v4**, and upstream firmware documentation baseline **`V2.000.0001.0015`**; verify your hardware/firmware. The exact SDK commit is pinned in [`studio/pyproject.toml`](studio/pyproject.toml).
+
+## Try without hardware
+
+Choose `sample_data/` in the GUI and train, or use the new export CLI:
 
 ```bash
-# Classify five recorded repetitions with the included models.
-python recognize.py --models pretrained_models --input "sample_data/向上.json"
-
-# Train your own copies of all six example models.
-python train_hmm.py --data sample_data --output models
-python recognize.py --models models --input "sample_data/向左.json"
+uv run --locked --package hmm-gesture-studio hmm-gesture-train --data sample_data --output exports/demo.gesture.json
+uv run --locked python examples/recognize_export.py --bundle exports/demo.gesture.json --input "sample_data/向上.json"
 ```
 
-The included filenames and prediction labels are Chinese; see the table below. Testing on these same examples is a pipeline smoke test, **not an independent accuracy benchmark**.
+Six example gestures are supplied: snap, flick, up, down, left and right, with five repetitions each at 25 Hz. Names remain Chinese. Legacy JSON without a rate is interpreted as 25 Hz. Classifying the same recordings used for training verifies the pipeline, **not independent accuracy**.
 
-> Models are Python pickle files. Load only files you trust: unpickling can execute code. If dependency changes make a model incompatible, retrain it from the JSON data.
+## Use only the Python recognition package
 
-### 3. Find your ring
+From the repository root, `uv sync --locked` installs only the runtime and its dependencies (and removes Studio/BLE packages from the shared environment). To add the runtime to a different uv application, run there:
 
 ```bash
-python -m openzilo scan --timeout 10
-python -m openzilo info --address "AA:BB:CC:DD:EE:FF"
+uv add /path/to/OpenZilo-HMM
 ```
 
-Replace the example address in every command with the identifier returned by `scan`. macOS normally returns a UUID rather than a MAC address. Scanning may list other nearby BLE devices; select your ring. Disconnect other apps that are using it.
-
-### 4. Record a gesture
-
-The documented firmware starts in recording mode. **Before starting a live command**, switch the ring to gesture mode with a single button press if needed, and wait for the switch to finish. A single-press event alone does not confirm the resulting mode. The SDK cannot query or set that mode; `start_sensor_report()` must succeed before samples can be received.
+Or build a standalone wheel from this repository, then add that wheel in the consumer project:
 
 ```bash
-python record_gesture.py --name snap --ring --address "AA:BB:CC:DD:EE:FF" --reps 5
+uv build --package hmm-gesture --wheel
+# In the consumer project:
+uv add /path/to/OpenZilo-HMM/dist/hmm_gesture-0.2.0-py3-none-any.whl
 ```
 
-1. Press **Enter in the terminal** to start a take.
-2. Perform one gesture, then press Enter again to finish.
-3. Repeat until five valid takes have been collected. Takes shorter than 12 samples are retried.
-4. The dataset is saved to `gestures/snap.json`, with the sample rate reported by the device.
+Given `samples`, an `(N, 6)` array/list containing one complete gesture:
 
-The receiver stays active between takes and discards idle samples. You do not need to hold the ring button during host-side recording or recognition. Avoid changing device modes mid-session.
+```python
+from hmm_gesture import GestureRecognizer
 
-Use at least two valid repetitions per gesture; five or more is a useful starting point. Record multiple gesture classes, keep ring placement and orientation consistent, and leave out unnecessarily long pauses. Recording again with the same name and output directory **overwrites** the JSON file. Cancelling before completion does not save a partial session.
+recognizer = GestureRecognizer.load("demo.gesture.json", min_confidence=0.0)
+print(recognizer.gesture_names, recognizer.sample_rate_hz)
 
-Alternatively, import one repetition per **headerless CSV** file:
+result = recognizer.predict(samples, sample_rate_hz=25)
+if result is not None:
+    print(result.name, result.confidence, result.score)
+```
+
+For continuous data, the application owns acquisition (SDK, serial, network or files):
+
+```python
+# Each batch contains rows [ax, ay, az, gx, gy, gz].
+for result in recognizer.feed(batch, sample_rate_hz=25):
+    print(result.name, result.confidence)
+
+recognizer.reset()  # Reset stream state and baseline on reconnect/repositioning.
+```
+
+`feed()` returns **all** completed predictions in a batch, not just the last. `predict()` does not segment and returns `None` for fewer than two feature windows. Exports use versioned JSON numeric parameters, never pickle deserialization. See [architecture and format](docs/architecture.md).
+
+### Data and recognition limits
+
+- Axis order is **`ax, ay, az, gx, gy, gz`**, in raw signed int16 units, not g or degrees/second. Shape, finiteness and range are checked.
+- Passing `sample_rate_hz` checks consistency; it does not configure hardware or resample. Keep orientation, units and sensor ranges consistent with training.
+- Segmentation uses motion relative to an idle baseline: default threshold 1500, minimum 12 samples, maximum 125. Overlong movements are discarded; incomplete gestures are not flushed at end of input.
+- Confidence is a relative likelihood-gap heuristic, **not a calibrated probability or reliable unknown-gesture detector**. A single model has fixed confidence 0.8.
+- Recognizers maintain one stream's state and are not intended to be shared between threads/devices. Evaluate with independent recordings.
+
+## Existing command-line compatibility
+
+After installing both components, the original scripts still work:
 
 ```bash
-python record_gesture.py --name snap --from-csv snap1.csv snap2.csv --sample-rate 25
-python record_gesture.py --name snap --interactive --reps 5 --sample-rate 25
+uv run --locked --all-packages python record_gesture.py --name snap --ring --address "DEVICE-ADDRESS" --reps 5
+uv run --locked --all-packages python train_hmm.py --data sample_data --output models
+uv run --locked --all-packages python recognize.py --models models --input "sample_data/向左.json"
 ```
 
-### 5. Train and recognize
+The legacy trainer still emits `.pkl`, and the legacy recognizer can read it. **Only load trusted pickle files**: deserialization may execute code. They do not store preprocessing settings, so the new package/GUI deliberately does not import them. Retrain from recording JSON to produce a portable export. Legacy recording overwrites matching filenames; GUI saves use an append confirmation instead.
 
-```bash
-python train_hmm.py --data gestures --output models
-python recognize.py --models models --ring --address "AA:BB:CC:DD:EE:FF"
-```
-
-Return to a still position between gestures so the motion segmenter can detect their boundaries. Press `Ctrl+C` to stop. The application attempts to stop IMU reporting before disconnecting. This does not switch the ring out of gesture mode.
-
-## Example data and models
-
-| Gesture | Dataset in `sample_data/` | Model in `pretrained_models/` |
-| --- | --- | --- |
-| Finger snap | `打响指-hmm.json` | `打响指-hmm.pkl` |
-| Wrist flick | `甩-hmm.json` | `甩-hmm.pkl` |
-| Up | `向上.json` | `向上.pkl` |
-| Down | `向下.json` | `向下.pkl` |
-| Left | `向左.json` | `向左.pkl` |
-| Right | `向右.json` | `向右.pkl` |
-
-Each dataset has five repetitions at **25 Hz**. These are development examples, not a general-purpose gesture dataset. Wearer, ring orientation, IMU range, sampling rate, and motion speed affect recognition. Retrain for your users and evaluate on separately recorded data.
-
-## How it works
-
-1. **Preprocessing:** a median filter followed by a second-order Butterworth low-pass filter.
-2. **Features:** sliding-window mean, variance, RMS, and zero-crossing rate across six axes, producing 24 features per window.
-3. **Training:** a Gaussian HMM with diagonal covariance per class. The left-to-right start/transition probabilities stay fixed; EM learns the means and covariances. Short sequences reduce the effective state count.
-4. **Live segmentation:** movement relative to an adaptive baseline marks gesture boundaries, with pre-roll and cooldown. Offline mode classifies each recorded repetition directly, without this segmentation step.
-5. **Classification:** choose the highest log-likelihood model. The displayed confidence is a score-gap heuristic, **not a calibrated probability**. With only one model it is fixed at `0.8`; there is no reliable unknown-gesture rejection by default.
-
-### Parameters
-
-| Parameter | Default | Used by |
-| --- | --- | --- |
-| `--sample-rate` | 25 Hz | Training and recognition; CSV/terminal recording metadata |
-| `--cutoff-hz` | 10 Hz | Training and recognition; must be below half the sample rate |
-| `--n-states` | 6 | Training; automatically reduced for short sequences |
-| `--window-size` | 8 samples | Training and recognition |
-| `--window-overlap` | 4 samples | Training and recognition |
-| `energy_threshold` | 1500 raw-count distance | `MotionSegmenter` constructor in `recognize.py`, not a CLI flag |
-| `min_gesture_len` / `max_gesture_len` | 10 / 125 samples | Segmenter; overly long motion is discarded |
-
-**Use the same preprocessing parameters for training and recognition.** Existing `.pkl` files do not store preprocessing settings. The supplied models use the defaults above. Live recognition rejects a device rate different from `--sample-rate`; this option does not change the hardware sampling rate or resample data. JSON sample-rate metadata is checked during training and offline recognition. At the default window settings, at least 12 raw samples are needed to produce two feature windows.
-
-## Data format
-
-Each row contains six **raw signed 16-bit sensor values** in this order:
+## Layout and development
 
 ```text
-ax, ay, az, gx, gy, gz
+pyproject.toml                Runtime distribution and uv workspace
+uv.lock                       Shared, version-controlled dependency lockfile
+.python-version               Development Python version (3.12)
+src/hmm_gesture/               Config, preprocessing, bundle, segmentation, inference
+studio/pyproject.toml          Separate training platform and pinned SDK dependency
+studio/src/hmm_gesture_studio/ GUI, datasets, training, background BLE service
+examples/recognize_export.py   SDK/GUI-free consumer example
+sample_data/                  Example recordings
+pretrained_models/            Preserved legacy pickle examples
+record_gesture.py, etc.       Compatibility CLI entry points
+tests/                        Runtime/export, GUI controller and mocked SDK tests
 ```
-
-Do not substitute physical units such as g or degrees/second without retraining and adjusting segmentation thresholds. CSV files contain numeric rows only, no header or timestamp column. JSON uses this structure (shortened here; real repetitions need more samples):
-
-```json
-{
-  "name": "snap",
-  "created_at": "2026-09-29T12:00:00+00:00",
-  "sample_rate_hz": 25,
-  "num_repetitions": 2,
-  "repetitions": [
-    {"index": 0, "num_samples": 1, "data": [[1637, 530, -737, 1086, 476, 601]]},
-    {"index": 1, "num_samples": 1, "data": [[1805, 22, -985, 647, 61, 245]]}
-  ]
-}
-```
-
-The recorder keeps the six axes and sample rate, not the SDK timestamps or batch sequence numbers. The legacy `threshold` field in the example JSON files is not used by this pipeline.
-
-## Repository layout
-
-```text
-record_gesture.py       Record BLE data or import CSV/terminal data
-train_hmm.py            Train one HMM per gesture
-recognize.py            Offline and live host-side recognition
-ring_stream.py          OpenZilo connection and IMU stream lifecycle
-signal_filter.py        Median and low-pass filtering
-feature_extractor.py    Sliding-window statistical features
-sample_data/            Six example datasets
-pretrained_models/      Six example pickle models
-tests/                  Hardware-free regression tests
-docs/sdk.md             SDK integration and migration notes (EN / 中文)
-requirements.txt        Dependencies and pinned official SDK
-```
-
-## Troubleshooting
-
-- **`No module named openzilo`:** install `requirements.txt` in the same Python environment used to run the scripts. Python below 3.10 is unsupported.
-- **Device busy when starting IMU:** finish any active operation, check gesture mode and battery, then retry. Receiving a button event is not proof of a successful mode switch.
-- **No IMU data or connection failure:** check Bluetooth permissions, the scanned address, other connected apps, and the device mode. Timeout warnings are shown; transport/protocol errors end the session rather than silently retrying forever.
-- **No gesture or poor results:** check ring orientation and raw-value units, retrain on your own data, match preprocessing settings, and tune `MotionSegmenter` for your motions. Offline success does not guarantee live segmentation will work.
-
-## Documentation and development
-
-- [SDK migration and a minimal IMU example](docs/sdk.md)
-- [OpenZilo SDK guide](https://github.com/ziloai/OpenZilo/blob/main/docs/python-sdk.zh-CN.md)
-- [BLE protocol](https://github.com/ziloai/OpenZilo/blob/main/docs/protocol.zh-CN.md) and [architecture](https://github.com/ziloai/OpenZilo/blob/main/docs/architecture.zh-CN.md)
-- [OpenZilo and ComBodied Agents research](https://github.com/ziloai/OpenZilo#research-and-partners)
-
-Run tests without hardware:
 
 ```bash
-python -m unittest discover -s tests -v
+uv run --locked --all-packages python -m unittest discover -s tests -v
+uv build --all-packages --wheel
 ```
 
-Report bugs and propose improvements through [GitHub Issues](https://github.com/ziloai/OpenZilo-HMM/issues). When contributing, describe the device/firmware and preprocessing settings needed to reproduce the issue. Do not include private device identifiers or recordings without permission. SDK integration tests use simulated devices; real BLE behavior still needs validation on the target kit.
+Add runtime dependencies with `uv add PACKAGE`, or Studio-only dependencies with `uv add --package hmm-gesture-studio PACKAGE`. These commands update the appropriate manifest and `uv.lock`; commit both. After manual manifest edits, run `uv lock` followed by `uv sync --locked --all-packages`. Upgrade a dependency deliberately with `uv lock --upgrade-package PACKAGE`, then sync and test.
+
+Tests do not access real BLE hardware. Validate GUI and device behavior on target systems. See [SDK integration](docs/sdk.md) before changing the pinned SDK. Report issues at [GitHub Issues](https://github.com/ziloai/OpenZilo-HMM/issues).
 
 ## License
 
-This project's software, documentation, example datasets, and pretrained models are licensed under [MPL-2.0](LICENSE), matching the OpenZilo SDK's software license. Brand and third-party marks belong to their respective owners; the license does not grant trademark rights.
-
-See [NOTICE.md](NOTICE.md) for asset provenance and license scope.
+Software, documentation, example data, pretrained models and bundled assets are provided under [MPL-2.0](LICENSE), matching OpenZilo's software license. The supplied data, models and images are authorized for redistribution. Dependencies retain their own licenses; brands and trademarks belong to their owners. See [NOTICE.md](NOTICE.md).

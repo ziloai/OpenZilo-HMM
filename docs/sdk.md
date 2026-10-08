@@ -6,13 +6,15 @@
 
 ### Dependency and source of truth
 
-This project uses the official [`OpenZilo`](https://github.com/ziloai/OpenZilo) distribution, imported as `openzilo`. `requirements.txt` pins SDK **0.5.0** to commit [`e9a861dd5c82a154fba0f1bafb628cd04fbd9555`](https://github.com/ziloai/OpenZilo/commit/e9a861dd5c82a154fba0f1bafb628cd04fbd9555). Python 3.10+ and Git are required to install it:
+This project uses the official [`OpenZilo`](https://github.com/ziloai/OpenZilo) distribution, imported as `openzilo`. `studio/pyproject.toml` pins SDK **0.5.0** to commit [`e9a861dd5c82a154fba0f1bafb628cd04fbd9555`](https://github.com/ziloai/OpenZilo/commit/e9a861dd5c82a154fba0f1bafb628cd04fbd9555). Install it with uv, Python 3.10+ and Git (commands run from the workspace root):
 
 ```bash
-python -m pip install -r requirements.txt
-python -c "import openzilo; print(openzilo.__version__)"
-python -m openzilo scan --timeout 10
+uv sync --locked --all-packages
+uv run --locked --all-packages python -c "import openzilo; print(openzilo.__version__)"
+uv run --locked --all-packages python -m openzilo scan --timeout 10
 ```
+
+Only the training platform and legacy ring CLIs depend on the SDK. The standalone `hmm-gesture` package takes application-provided IMU arrays and does not import OpenZilo or BLE. See [the two-component architecture](architecture.md).
 
 BLE is supplied by the SDK's `bleak` dependency. `ffmpeg` is not needed for IMU data, training, or recognition.
 
@@ -38,7 +40,7 @@ The upstream behavior baseline is firmware `V2.000.0001.0015`; verify other firm
 
 The high-level IMU functions and six-axis fields remain compatible: `get_system_info`, `start_sensor_report`, `wait_sensor_data`, and `stop_sensor_report`. The `sdk.TimeoutError` type is an SDK exception, not Python's built-in `TimeoutError`.
 
-The old bundled SDK and its manuals have been removed. `ring_stream.py` is application lifecycle code, **not another SDK**. It connects, starts reports, and attempts to stop them before disconnecting; it does not switch modes. Recording keeps a single receiver alive between takes, retries short takes, saves the reported sampling rate, and propagates transport/protocol failures.
+The old bundled SDK and its manuals have been removed. `studio/src/hmm_gesture_studio/ring_stream.py` is application lifecycle code, **not another SDK** (the root module is now a compatibility import). It connects, starts reports, and attempts to stop them before disconnecting; it does not switch modes. Recording keeps a single receiver alive between takes, retries short takes, saves the reported sampling rate, and propagates transport/protocol failures.
 
 Existing JSON datasets and pickle models are not rewritten by this migration. Check sampling rate, raw units, axis order, sensor ranges, and preprocessing settings before reusing a model. Pickle compatibility also depends on the Python libraries; retrain when needed.
 
@@ -82,7 +84,7 @@ Important boundaries:
 
 ### Updating the dependency later
 
-Review upstream public exports and release changes, change the full commit hash in `requirements.txt`, and update the SDK version/baseline in both READMEs and this document. Reinstall, run `python -m unittest discover -s tests -v`, then validate scan, recording, recognition, cancellation, and disconnection on a real ring. Do not replace the pinned revision with a moving branch for a release.
+Review upstream public exports and release changes, change the full commit hash in `studio/pyproject.toml`, and update the SDK version/baseline in both READMEs and this document. Run `uv lock`, commit the updated `uv.lock` alongside the manifest, sync with `uv sync --locked --all-packages`, and run `uv run --locked --all-packages python -m unittest discover -s tests -v`. Then validate scan, recording, recognition, cancellation, and disconnection on a real ring. Do not replace the pinned revision with a moving branch for a release.
 
 This project and the SDK use MPL-2.0; see the root [LICENSE](../LICENSE). The README hero image is copied unchanged from `docs/assets/openzilo-hero.png` at the same upstream revision and is used with OpenZilo's authorization. OpenZilo branding remains with its owner. See [NOTICE.md](../NOTICE.md) for license scope and provenance.
 
@@ -90,7 +92,9 @@ This project and the SDK use MPL-2.0; see the root [LICENSE](../LICENSE). The RE
 
 ### 依赖与文档来源
 
-项目直接依赖官方 [`OpenZilo`](https://github.com/ziloai/OpenZilo) 包，通过 `import openzilo as sdk` 导入。`requirements.txt` 固定为 SDK **0.5.0**，提交为 **`e9a861dd5c82a154fba0f1bafb628cd04fbd9555`**。安装需要 Python 3.10+ 和 Git，命令见上文。
+项目直接依赖官方 [`OpenZilo`](https://github.com/ziloai/OpenZilo) 包，通过 `import openzilo as sdk` 导入。`studio/pyproject.toml` 固定为 SDK **0.5.0**，提交为 **`e9a861dd5c82a154fba0f1bafb628cd04fbd9555`**。使用 uv 管理安装，需要 Python 3.10+ 和 Git，在工作区根目录运行上文命令。
+
+仅训练平台及旧戒指命令行依赖 SDK；独立的 `hmm-gesture` 包只接收应用提供的 IMU 数据，不导入 OpenZilo 或 BLE。见[两部分架构](architecture.md)。
 
 Bleak 由 SDK 自动安装。本项目不处理音频，因此不需要 `ffmpeg`。上文链接均指向固定提交的 SDK 手册、协议、架构和公开 API，不在本仓库重复维护一份可能过时的协议文档。上游固件说明基线为 `V2.000.0001.0015`，其他固件需要真机确认。
 
@@ -107,7 +111,7 @@ Bleak 由 SDK 自动安装。本项目不处理音频，因此不需要 `ffmpeg`
 
 `get_system_info`、`start_sensor_report`、`wait_sensor_data`、`stop_sensor_report` 及六轴数据字段保持兼容。注意 `sdk.TimeoutError` 是 SDK 自己的异常类型，不是 Python 内置的 `TimeoutError`。
 
-旧 SDK 及其手册已移除。`ring_stream.py` 只管理应用侧的连接、开启上报、退出前停止上报，**不是另一份 SDK**，也不负责切换设备模式。采集器在两次录制之间继续消费数据，短录制会真正重试，保存设备实际采样率，并向调用方传递传输或协议错误。
+旧 SDK 及其手册已移除。`studio/src/hmm_gesture_studio/ring_stream.py` 只管理应用侧的连接、开启上报、退出前停止上报（根目录同名文件现为兼容导入），**不是另一份 SDK**，也不负责切换设备模式。采集器在两次录制之间继续消费数据，短录制会真正重试，保存设备实际采样率，并向调用方传递传输或协议错误。
 
 此次迁移不会改写原有 JSON 数据和 pickle 模型。复用模型前需核对采样率、原始单位、轴顺序、传感器量程和预处理设置；pickle 兼容性也受 Python 依赖版本影响，必要时重新训练。
 
@@ -125,6 +129,6 @@ Bleak 由 SDK 自动安装。本项目不处理音频，因此不需要 `ffmpeg`
 
 ### 后续升级
 
-核对上游公开 API 和变更，更新 `requirements.txt` 的完整提交哈希，同时修改中英文 README 与本文的版本说明。重新安装后运行 `python -m unittest discover -s tests -v`，再用真机检查扫描、录制、识别、取消和断连。正式发布时不要改用浮动分支。
+核对上游公开 API 和变更，更新 `studio/pyproject.toml` 的完整提交哈希，同时修改中英文 README 与本文的版本说明。运行 `uv lock`，将更新后的 `uv.lock` 与依赖声明一起提交；用 `uv sync --locked --all-packages` 同步环境，再运行 `uv run --locked --all-packages python -m unittest discover -s tests -v`，然后用真机检查扫描、录制、识别、取消和断连。正式发布时不要改用浮动分支。
 
 本项目与 SDK 均采用 MPL-2.0，见根目录 [LICENSE](../LICENSE)。README 展示图原样取自同一上游提交的 `docs/assets/openzilo-hero.png`，经 OpenZilo 官方授权使用；OpenZilo 品牌标识归权利人所有。许可范围与素材来源见 [NOTICE.md](../NOTICE.md)。

@@ -30,7 +30,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.13'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --all-packages --python ${{ matrix.python }}
+      - run: uv run --locked --all-packages --python ${{ matrix.python }} python -m unittest discover -s tests -v
+      - name: Verify runtime-only dependency boundary
+        run: |
+          uv sync --locked --python ${{ matrix.python }}
+          uv run --locked --python ${{ matrix.python }} python -c "import importlib.util; import hmm_gesture; assert importlib.util.find_spec('hmm_gesture_studio') is None; assert importlib.util.find_spec('openzilo') is None"
+      - name: Build independent runtime and Studio wheels
+        run: uv build --all-packages --wheel --out-dir dist --python ${{ matrix.python }}
