@@ -48,8 +48,12 @@ class Studio:
         self.preview_repetitions = []
         self.preview_rate = None
         self.preview_is_pending = False
+        self.preview_training_regions = []
+        self.preview_path = None
+        self.preview_editable = False
         self.recognition_origin = 0
         self.pending = []
+        self.pending_regions = []
         self.take = None
         self.take_rate = None
         self.pending_rate = None
@@ -141,7 +145,7 @@ class Studio:
         self.preview_choice.pack(side="left", padx=8)
         self.preview_choice.bind("<<ComboboxSelected>>", self.show_preview)
         self.button(preview_controls, "返回录制 / 训练", lambda: self.tabs.select(self.gesture_tab)).pack(side="right")
-        self.preview_plot = RecordingPlot(self.preview_tab)
+        self.preview_plot = RecordingPlot(self.preview_tab, on_training_region=self.set_preview_training_region)
         self.preview_plot.widget.pack(fill="both", expand=True)
         self._build_audio(audio)
         work = ttk.Frame(gesture)
@@ -469,7 +473,7 @@ class Studio:
             config = self.segmentation_settings(pipeline)
             if config.mode == "impulse":
                 self.mode_text.set(f"短促动作：加速度相邻差触发，前 {config.pre_roll / pipeline.sample_rate_hz:.2f}s "
-                                   f"+ 后 {config.post_roll / pipeline.sample_rate_hz:.2f}s；每次需包含一个完整冲击；训练自动裁剪")
+                                   f"+ 后 {config.post_roll / pipeline.sample_rate_hz:.2f}s；训练默认自动裁剪，可在波形页手动框选")
             else:
                 self.mode_text.set(f"连续动作：结束静止 {config.min_offset_frames / pipeline.sample_rate_hz:.2f}s，"
                                    f"最长 {config.max_gesture_len / pipeline.sample_rate_hz:.1f}s（按采样率换算）")
@@ -477,10 +481,16 @@ class Studio:
             self.mode_text.set("参数尚未完整或无效；请检查采样率、低通、中值窗口和触发阈值。")
         self.show_preview()
 
-    def preview_recordings(self, repetitions, rate, title, *, pending=False, reveal=False):
+    def preview_recordings(self, repetitions, rate, title, *, pending=False, reveal=False,
+                           training_regions=None, path=None):
         self.preview_repetitions = list(repetitions)
         self.preview_rate = rate
         self.preview_is_pending = pending
+        self.preview_training_regions = (list(training_regions) if training_regions is not None
+                                         else [None] * len(repetitions))
+        self.preview_path = path
+        # Short rejected takes can still be viewed, but have no editable target.
+        self.preview_editable = path is not None or (pending and training_regions is not None)
         self.preview_title.set(title)
         choices = [f"第 {i + 1} 次 · {len(rep)} 样本" for i, rep in enumerate(repetitions)]
         self.preview_choice.configure(values=choices)
@@ -494,6 +504,7 @@ class Studio:
 
     def show_preview(self, _event=None):
         index = self.preview_choice.current()
+        self.preview_plot.set_editable(False)
         if not self.preview_repetitions or not 0 <= index < len(self.preview_repetitions):
             self.preview_plot.clear()
             return
@@ -501,16 +512,68 @@ class Studio:
             # Use the recording's actual rate, not a potentially different training rate.
             pipeline = self.pipeline_settings(self.preview_rate)
             self.preview_plot.show_recording(self.preview_repetitions[index], pipeline,
-                                             segmentation=self.segmentation_settings(pipeline))
+                                             segmentation=self.segmentation_settings(pipeline),
+                                             training_region=self.preview_training_regions[index])
+            self.preview_plot.set_editable(self.preview_editable and not self.training and not self.closing)
         except (ValueError, TypeError) as exc:
             self.preview_plot.clear(f"无法预览，请检查滤波参数：{exc}")
 
     def preview_dataset(self, _event=None):
         selected = self.tree.selection()
         if selected and selected[0] in self.records:
-            dataset = self.records[selected[0]][1]
+            path, dataset = self.records[selected[0]]
             self.preview_recordings(dataset.repetitions, dataset.sample_rate_hz,
-                                    f"已保存：{dataset.name}")
+                                    f"已保存：{dataset.name}", path=path,
+                                    training_regions=dataset.training_regions)
+
+    def set_preview_training_region(self, region):
+        """Commit an annotation, never destructively crop a recording or append it."""
+        if self.training or self.closing or not self.preview_editable:
+            return
+        index = self.preview_choice.current()
+        if not 0 <= index < len(self.preview_repetitions):
+            return
+        try:
+            from .datasets import save_dataset_file, validate_training_region
+            region = validate_training_region(region, len(self.preview_repetitions[index]))
+            if region is not None:
+                minimum = self.pipeline_settings(self.preview_rate).min_samples
+                if region[1] - region[0] < minimum:
+                    raise ValueError(f"手动训练框过短，至少需要 {minimum} 个采样点，请扩大选框。")
+            if region == self.preview_training_regions[index]:
+                return
+            if self.preview_is_pending:
+                self.pending_regions[index] = region
+                self.preview_training_regions[index] = region
+                saved_text = "随录制一起保存"
+            elif self.preview_path is not None:
+                # Re-read before editing; never overwrite externally changed raw
+                # recordings or unrelated annotations with a stale preview copy.
+                dataset = load_dataset(self.preview_path)
+                if (not self.same_rate(dataset.sample_rate_hz, self.preview_rate)
+                        or len(dataset.repetitions) != len(self.preview_repetitions)
+                        or any(not np.array_equal(a, b) for a, b in
+                               zip(dataset.repetitions, self.preview_repetitions))):
+                    raise ValueError("录制文件已变化，请刷新数据集后重新选择。")
+                regions = list(dataset.training_regions or [None] * len(dataset.repetitions))
+                regions[index] = region
+                dataset.training_regions = regions
+                save_dataset_file(dataset, self.preview_path)
+                self.preview_training_regions = list(regions)
+                for key, (path, _) in list(self.records.items()):
+                    if path == self.preview_path:
+                        self.records[key] = (path, dataset)
+                self.invalidate("训练裁剪框已改变")
+                saved_text = "已保存到原文件；需重新训练"
+            else:
+                return
+            detail = (f"手动训练框 [{region[0]}, {region[1]})，{region[1] - region[0]} 样本"
+                      if region is not None else "已恢复自动裁剪")
+            self.log(f"第 {index + 1} 次：{detail}；{saved_text}。原始录制不变。")
+        except (ValueError, OSError, TypeError) as exc:
+            self.error(str(exc))
+        finally:
+            self.show_preview()
 
     def update_takes(self):
         lengths = [len(rep) for rep in self.pending]
@@ -528,6 +591,7 @@ class Studio:
     def clear_takes(self):
         self.cancel_take()
         self.pending.clear()
+        self.pending_regions.clear()
         self.pending_rate = None
         self.update_takes()
         if self.preview_is_pending:
@@ -557,6 +621,8 @@ class Studio:
 
     def refresh(self):
         self.invalidate("数据目录或数据集已刷新")
+        if self.preview_path is not None:
+            self.preview_recordings([], None, "请重新选择已保存手势")
         self.records.clear()
         self.invalid_files = []
         self.tree.delete(*self.tree.get_children())
@@ -668,9 +734,11 @@ class Studio:
                 try:
                     dataset = GestureDataset(self.name.get().strip(), [np.asarray(samples)], self.take_rate)
                     self.pending.extend(dataset.repetitions)
+                    self.pending_regions.append(None)
                     self.pending_rate = self.take_rate
                     self.preview_recordings(self.pending, self.pending_rate,
-                                            f"未保存：{dataset.name}", pending=True, reveal=True)
+                                            f"未保存：{dataset.name}", pending=True, reveal=True,
+                                            training_regions=self.pending_regions)
                 except Exception as exc:
                     self.error(str(exc))
             self.update_takes()
@@ -690,8 +758,10 @@ class Studio:
             self.error("请先停止本次录制。")
         elif self.pending:
             self.pending.pop()
+            self.pending_regions.pop()
             self.update_takes()
-            self.preview_recordings(self.pending, self.pending_rate, f"未保存：{self.name.get()}", pending=True)
+            self.preview_recordings(self.pending, self.pending_rate, f"未保存：{self.name.get()}", pending=True,
+                                    training_regions=self.pending_regions)
 
     @staticmethod
     def same_rate(a, b):
@@ -708,8 +778,10 @@ class Studio:
             if not messagebox.askyesno("追加重复？", f"“{dataset.name}”已有 {len(existing.repetitions)} 次。\n"
                                       f"追加本次 {len(dataset.repetitions)} 次？原数据将保留。", parent=self.root):
                 return False
+            regions = ((existing.training_regions or [None] * len(existing.repetitions))
+                       + (dataset.training_regions or [None] * len(dataset.repetitions)))
             dataset = GestureDataset(dataset.name, existing.repetitions + dataset.repetitions,
-                                     dataset.sample_rate_hz)
+                                     dataset.sample_rate_hz, regions)
         if len(dataset.repetitions) < minimum:
             raise ValueError(f"保存录制需要至少 {minimum} 次重复（可以包含已有数据）。")
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -723,9 +795,13 @@ class Studio:
             self.error("请先停止录制，并至少保留一次有效重复。")
             return
         try:
-            dataset = GestureDataset(self.name.get().strip(), list(self.pending), self.pending_rate)
+            dataset = GestureDataset(self.name.get().strip(), list(self.pending), self.pending_rate,
+                                     list(self.pending_regions))
             if self.persist(dataset, minimum=2):
-                self.preview_recordings(dataset.repetitions, dataset.sample_rate_hz, f"刚保存：{dataset.name}")
+                path = dataset_path(dataset.name, self.directory)
+                saved = load_dataset(path)
+                self.preview_recordings(saved.repetitions, saved.sample_rate_hz, f"刚保存：{saved.name}",
+                                        path=path, training_regions=saved.training_regions)
                 self.clear_takes()
         except Exception as exc:
             self.error(str(exc))
@@ -782,6 +858,7 @@ class Studio:
             self.error(str(exc))
             return
         self.stop_live()
+        self.preview_plot.set_editable(False)
         # A failed new run must never leave a previous model looking current.
         self.bundle = None
         self.origin = None
@@ -829,6 +906,7 @@ class Studio:
         for widget in self.locked:
             widget.configure(state="disabled")
         self.export_button.configure(state="disabled")
+        self.preview_plot.set_editable(False)
         self.evaluation_text.set("正在后台逐次留出评估；不会替换当前模型…")
         revision = self.revision
 
@@ -844,6 +922,7 @@ class Studio:
 
     def finish_training(self):
         self.training = False
+        self.show_preview()
         for widget in self.locked:
             widget.configure(state="normal")
         self.update_takes()

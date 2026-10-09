@@ -53,6 +53,10 @@ class GuiControllerTests(unittest.TestCase):
         app.preview_repetitions = []
         app.preview_rate = None
         app.preview_is_pending = False
+        app.preview_training_regions = []
+        app.preview_path = None
+        app.preview_editable = False
+        app.pending_regions = []
         app.recognition_origin = 0
         app.preview_plot = Mock()
         app.preview_choice = Mock()
@@ -416,7 +420,7 @@ class GuiControllerTests(unittest.TestCase):
         self.assertEqual((segmentation.pre_roll, segmentation.post_roll, segmentation.max_gesture_len), (12, 28, 500))
         self.assertEqual(segmentation.energy_threshold, 8000)
         self.assertTrue(self.app.stale)
-        self.assertIn("训练自动裁剪", self.app.mode_text.get())
+        self.assertIn("训练默认自动裁剪", self.app.mode_text.get())
         self.app.apply_preset("motion")
         self.assertEqual(self.app.pipeline_settings().median_kernel, 5)
         self.assertEqual(self.app.segmentation_settings(self.app.pipeline_settings()).max_gesture_len, 500)
@@ -489,6 +493,101 @@ class GuiControllerTests(unittest.TestCase):
         self.app.parameters_changed()
         self.assertIn("无法预览", self.app.preview_plot.clear.call_args.args[0])
         self.assertEqual(self.app.preview_repetitions, dataset.repetitions)
+
+    def test_manual_regions_survive_switch_undo_save_append_and_reload(self):
+        self.record(count=40, value=2)
+        self.app.set_preview_training_region((5, 25))
+        self.record(count=40, value=3)
+        self.app.set_preview_training_region((10, 30))
+        self.app.preview_choice.current(0)
+        self.app.show_preview()
+        self.assertEqual(self.app.preview_plot.show_recording.call_args.kwargs["training_region"], (5, 25))
+        self.record(count=40, value=4)
+        self.app.undo()
+        self.assertEqual(self.app.pending_regions, [(5, 25), (10, 30)])
+        self.app.save_takes()
+        path = dataset_path(self.app.name.get(), self.app.directory)
+        saved = load_dataset(path)
+        self.assertEqual(saved.training_regions, [(5, 25), (10, 30)])
+        self.assertEqual([len(rep) for rep in saved.repetitions], [40, 40])
+        self.assertEqual(self.app.pending_regions, [])
+        self.assertEqual(self.app.preview_path, path)
+        self.record(count=40, value=5)
+        self.app.set_preview_training_region((1, 31))
+        self.app.save_takes()
+        self.assertEqual(load_dataset(path).training_regions, [(5, 25), (10, 30), (1, 31)])
+        self.assertEqual(len(self.app.preview_repetitions), 3)
+        self.app.set_preview_training_region(None)
+        self.assertEqual(load_dataset(path).training_regions, [(5, 25), (10, 30), None])
+        self.app.error.assert_not_called()
+
+    def test_manual_saved_edit_uses_exact_path_and_invalidates_model(self):
+        dataset = GestureDataset("已保存", [np.ones((40, 6))] * 3)
+        path = save_dataset(dataset, self.app.directory)
+        renamed = path.rename(self.app.directory / "imported-custom-name.json")
+        self.app.records["one"] = (renamed, dataset)
+        self.app.tree.selection.return_value = ["one"]
+        self.app.preview_dataset()
+        self.app.bundle, self.app.origin = Mock(), "trained"
+        self.app.evaluation_revision = self.app.revision
+        self.app.set_preview_training_region((3, 30))
+        self.assertFalse(path.exists())
+        saved = load_dataset(renamed)
+        self.assertEqual(saved.training_regions, [None, None, (3, 30)])
+        np.testing.assert_array_equal(saved.repetitions[2], dataset.repetitions[2])
+        self.assertEqual(self.app.records["one"][1].training_regions, saved.training_regions)
+        self.assertTrue(self.app.stale)
+        self.assertIsNone(self.app.evaluation_revision)
+        self.app.refresh()
+        self.assertEqual(self.app.preview_repetitions, [])
+        key = next(iter(self.app.records))
+        self.app.tree.selection.return_value = [key]
+        self.app.preview_dataset()
+        self.assertEqual(self.app.preview_plot.show_recording.call_args.kwargs["training_region"], (3, 30))
+        self.app.set_preview_training_region(None)
+        self.assertIsNone(load_dataset(renamed).training_regions)
+        self.app.error.assert_not_called()
+
+    def test_manual_region_rejects_short_out_of_bounds_and_busy_edits(self):
+        self.record(count=40)
+        self.app.set_preview_training_region((2, 30))
+        for region in ((2, 10), (-1, 30), (2, 41), (30, 2)):
+            with self.subTest(region=region):
+                self.app.error.reset_mock()
+                self.app.set_preview_training_region(region)
+                self.app.error.assert_called_once()
+                self.assertEqual(self.app.pending_regions, [(2, 30)])
+        self.app.training = True
+        self.app.set_preview_training_region(None)
+        self.assertEqual(self.app.pending_regions, [(2, 30)])
+        self.app.training = False
+        self.record(count=5)
+        self.assertFalse(self.app.preview_editable)
+        self.app.set_preview_training_region(None)
+        self.assertEqual(self.app.pending_regions, [(2, 30)])
+        self.app.discard_takes()
+        self.assertEqual(self.app.pending_regions, [])
+
+    def test_manual_saved_edit_failure_preserves_annotation_and_file(self):
+        dataset = GestureDataset("保存失败", [np.ones((40, 6))], training_regions=[(1, 25)])
+        path = save_dataset(dataset, self.app.directory)
+        self.app.preview_recordings(dataset.repetitions, 25, "已保存", path=path,
+                                    training_regions=dataset.training_regions)
+        original = path.read_bytes()
+        revision = self.app.revision
+        with patch("hmm_gesture_studio.datasets.save_dataset_file", side_effect=OSError("read only")):
+            self.app.set_preview_training_region((2, 30))
+        self.app.error.assert_called_once_with("read only")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.app.preview_training_regions, [(1, 25)])
+        self.assertEqual(self.app.revision, revision)
+        # An external raw-data edit cannot be overwritten from an old preview.
+        external = load_dataset(path)
+        external.repetitions[0][:] = 5
+        save_dataset(external, self.app.directory)
+        self.app.set_preview_training_region((2, 30))
+        self.assertIn("文件已变化", self.app.error.call_args.args[0])
+        self.assertTrue((load_dataset(path).repetitions[0] == 5).all())
 
     def enable_live(self):
         rng = np.random.default_rng(4)

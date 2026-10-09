@@ -54,7 +54,9 @@ def load_gesture_data(path: Path, expected_sample_rate: float | None = None) -> 
     if expected_sample_rate is not None and dataset.sample_rate_hz != expected_sample_rate:
         raise ValueError(f"{path}: sample_rate_hz={dataset.sample_rate_hz:g} does not match "
                          f"--sample-rate={expected_sample_rate:g}. Do not mix sampling rates.")
-    return dataset.name, dataset.repetitions
+    regions = dataset.training_regions or [None] * len(dataset.repetitions)
+    return dataset.name, [rep[region[0]:region[1]] if region is not None else rep
+                          for rep, region in zip(dataset.repetitions, regions)]
 
 
 def build_left_right_hmm(n_states: int, X: np.ndarray, lengths: list[int]) -> hmm.GaussianHMM:
@@ -130,16 +132,22 @@ def train_gesture(name: str, reps: list[np.ndarray], n_states: int,
 
 def _prepare_repetitions(dataset: GestureDataset, pipeline: PipelineConfig,
                          segmentation: SegmentationConfig) -> list[tuple[int, np.ndarray]]:
-    """Keep original indices and use the runtime's raw-recording crop policy.
+    """Use explicit annotations first, otherwise the runtime's crop policy.
 
-    Only legacy motion recordings may be skipped for being short. An impulse
-    take with zero/multiple/incomplete events is an error, not a choice of which
-    event or waiting time to train on. Neither crops nor thresholds are learned
-    here, so evaluation can use this same preflight without fitting held-out data.
+    Only unannotated motion recordings may be skipped for being short. Manual
+    regions bypass event detection, not minimum feature length validation.
+    Neither crops nor thresholds are learned from held-out data here.
     """
     usable = []
     for index, rep in enumerate(dataset.repetitions):
-        prepared = prepare_recording(rep, segmentation)
+        region = dataset.training_regions[index] if dataset.training_regions is not None else None
+        if region is not None:
+            prepared = rep[region[0]:region[1]]
+            if len(prepared) < pipeline.min_samples:
+                raise ValueError(f"{dataset.name}: 第 {index + 1} 次手动训练框过短；"
+                                 f"至少需要 {pipeline.min_samples} 个采样点，请扩大选框")
+        else:
+            prepared = prepare_recording(rep, segmentation)
         if segmentation.mode == "impulse" and (prepared is None or len(prepared) < pipeline.min_samples):
             raise ValueError(f"{dataset.name}: 第 {index + 1} 次录制无效；impulse 模式需要恰好一个动作和完整前后文"
                              f"（触发前 {segmentation.pre_roll} 点、后 {segmentation.post_roll} 点，"
@@ -229,6 +237,10 @@ def train_datasets(datasets: list[GestureDataset], pipeline: PipelineConfig,
         prepared_datasets.append((dataset, [rep for _, rep in prepared]))
     signal_filter, extractor = make_pipeline(pipeline)
     notify = progress or (lambda message: None)
+    if any(dataset.training_regions and any(region is not None for region in dataset.training_regions)
+           for dataset in datasets):
+        notify("使用手动训练框：仅框内原始数据参与训练及拒识标定；实时识别仍使用原分段/触发规则。"
+               "若自动检测不到动作，请检查触发阈值；手动框的长度和位置也应尽量与实时窗口一致。")
     models = {}
     summaries = {}
     rejection = {} if calibrate_rejection else None
@@ -246,6 +258,9 @@ def train_datasets(datasets: list[GestureDataset], pipeline: PipelineConfig,
         models[dataset.name] = model
         summaries[dataset.name] = {"recordings": len(dataset.repetitions), "used_recordings": count,
                                     "states": model.n_components, "training_score_per_frame": score}
+        if dataset.training_regions and any(region is not None for region in dataset.training_regions):
+            summaries[dataset.name]["manual_training_regions"] = sum(
+                region is not None for region in dataset.training_regions)
         if diagnostics is not None:
             summaries[dataset.name]["rejection_calibration"] = diagnostics
         notify(f"完成 {dataset.name}: {count}/{len(dataset.repetitions)} 次有效录制，"

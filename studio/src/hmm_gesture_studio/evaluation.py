@@ -55,8 +55,10 @@ def evaluate_leave_one_out(datasets: list[GestureDataset], pipeline: PipelineCon
     in later folds (and contribute no tests). Short recordings are excluded and
     reported in motion mode; malformed impulse takes are errors. Every class
     needs at least three usable recordings, or four with rejection calibration
-    (three remain for the trainer's inner leave-one-out). Preflight uses the same
-    fixed runtime crop policy as training; it estimates no thresholds.
+    (three remain for the trainer's inner leave-one-out). Preflight uses manual
+    regions when present, otherwise the runtime crop policy; it estimates no
+    thresholds. Held-out prediction still uses the original whole-take API,
+    never a manually selected test segment that could hide a missed trigger.
 
     Splitting precedes feature extraction, scale estimation and rejection
     calibration. No held-out frames, lengths, peaks or scores enter a fold's
@@ -83,15 +85,17 @@ def evaluate_leave_one_out(datasets: list[GestureDataset], pipeline: PipelineCon
     for source in datasets:
         # Work with validated copies: training must not mutate caller arrays,
         # and changes to the source during a progress callback cannot leak in.
-        dataset = GestureDataset(source.name, source.repetitions, source.sample_rate_hz)
+        dataset = GestureDataset(source.name, source.repetitions, source.sample_rate_hz,
+                                 source.training_regions)
         if dataset.name in skipped:
             raise ValueError(f"重复手势名称: {dataset.name}")
         if dataset.sample_rate_hz != pipeline.sample_rate_hz:
             raise ValueError(f"{dataset.name}: sample_rate_hz={dataset.sample_rate_hz:g} does not match "
                              f"evaluation rate {pipeline.sample_rate_hz:g}; 不支持混合采样率")
         prepared = _prepare_repetitions(dataset, pipeline, crop_config)
-        # Retain the original raw takes. Fold training and predict each use the
-        # runtime helper themselves; do not re-crop already shortened windows.
+        # Retain the original raw takes and annotations for fold training.
+        # Held-out predict still uses runtime detection on the WHOLE take:
+        # manual annotations must not disguise a detector that misses an event.
         usable = [(index, dataset.repetitions[index]) for index, _ in prepared]
         skipped[dataset.name] = len(dataset.repetitions) - len(usable)
         if len(usable) < minimum_recordings:
@@ -107,13 +111,18 @@ def evaluate_leave_one_out(datasets: list[GestureDataset], pipeline: PipelineCon
     metric = "positive_acceptance_rate" if len(validated) == 1 else "classification_accuracy"
     if len(validated) == 1:
         notify("单类留出结果仅为正样本通过率，不代表未知动作拒识准确率。")
+    if any(dataset.training_regions and any(region is not None for region in dataset.training_regions)
+           for dataset, _ in validated):
+        notify("手动框用于各折训练；留出测试仍对完整录制调用原识别流程，短促模式未触发也计为未识别。")
     for fold in range(folds):
         training = []
         held_out = []
         for dataset, usable in validated:
-            training.append(GestureDataset(dataset.name,
-                            [rep for position, (_, rep) in enumerate(usable) if position != fold],
-                            dataset.sample_rate_hz))
+            split = [(index, rep) for position, (index, rep) in enumerate(usable) if position != fold]
+            training.append(GestureDataset(dataset.name, [rep for _, rep in split],
+                            dataset.sample_rate_hz,
+                            [dataset.training_regions[index] for index, _ in split]
+                            if dataset.training_regions is not None else None))
             if fold < len(usable):
                 index, rep = usable[fold]
                 held_out.append((dataset.name, index, rep))

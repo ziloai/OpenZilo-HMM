@@ -64,7 +64,7 @@ r.reset()
 ```
 
 - 输入：按 `ax,ay,az,gx,gy,gz` 排列的二维数值序列，`shape=(N,6)`，使用原始 int16 传感器单位；形状、有限值、范围会验证。
-- `predict`：连续模式对整段分类；短促模式调用与训练相同的 `prepare_recording`，要求恰好一个完整事件。过短、无完整窗口、多事件或未通过拒识/置信度检查时返回 `None`。
+- `predict`：连续模式对整段分类；短促模式调用 `prepare_recording`，要求恰好一个完整自动检测事件；Studio 手动训练框不覆盖推理的触发规则。过短、无完整窗口、多事件或未通过拒识/置信度检查时返回 `None`。
 - `feed`：维护分段状态，返回所有通过检查的 `Prediction`，分批大小不改变窗口与位置。连续模式以尾部静止结束动作；短促模式按原始相邻加速度差触发，收齐固定 post-roll 后结束。**单类且无 `rejection` 标定时，非空 `feed()` 抛出 `ValueError`**，不再把所有候选都接受成该类。
 - `reset`：清除片段、冷却、基线和样本位置计数，适合断连重连或切换设备后调用。
 - `sample_rate_hz` 可选，但建议每次传入真实来源的采样率。省略表示调用者保证采样率匹配；包不会从数据自动估计或重采样。
@@ -104,15 +104,15 @@ bundle = train_datasets(
 bundle.save("exports/my-gestures.gesture.json")
 ```
 
-训练前检查重复名称、采样率和有效重复数。兼容 API 默认 `calibrate_rejection=False`，每类至少两次；上例及 GUI 开启拒识标定时每类至少三次。最短长度为 `2 * window_size - window_overlap`，短录制不会静默算成有效。短促模式以 `prepare_recording` 统一裁剪后拟合及标定，无完整窗口或多个事件则报错，原 JSON 不改写。任何一类失败不返回部分模型包。训练分数仅作诊断，不是测试集准确率。
+训练前检查重复名称、采样率和有效重复数。兼容 API 默认 `calibrate_rejection=False`，每类至少两次；上例及 GUI 开启拒识标定时每类至少三次。最短长度为 `2 * window_size - window_overlap`，短录制不会静默算成有效。未手动标注的短促录制以 `prepare_recording` 统一裁剪后拟合及标定，无完整窗口或多个事件则报错。有手动 `training_region` 时直接取指定原始区间，跳过自动触发检测，但仍验证最短特征长度；拟合及拒识标定使用同一选区。原始数据不截断，实时触发配置不因标注改变。任何一类失败不返回部分模型包。训练分数仅作诊断，不是测试集准确率。
 
 拒识标定逐次留出同类录制，拟合其他录制后计算该次的每帧分数下界；全量模型随后用于推理。它是保守的正样本经验限值，并未使用负样本验证。
 
 每个手势在其训练特征的标准化空间进行 EM，最终每维状态方差至少为标准化单位的 `0.01`。均值/方差随后通过逆仿射变换还原，模型打分包含正确的尺度 Jacobian，不需要给 v1 导出添加 scaler，也不改变旧模型的预处理。常量特征使用单位尺度。新正则化只影响重新训练的模型。
 
-可调用 `evaluate_leave_one_out(datasets, pipeline, n_states=6, segmentation=..., calibrate_rejection=True, progress=print)`（`hmm_gesture_studio.evaluation`），或点击 GUI“留出评估”。开启拒识时每类至少 4 次：外层留出的测试录制不进入内层训练、尺度估计或拒识标定；不开启的兼容模式仍需至少 3 次。每次完整录制恰好测试一次。返回 `correct`、`total`、`accuracy`、`per_class`、`confusion`、`skipped_recordings` 及原录制索引的 `predictions`。单类的数值只是正样本通过率，不是未知动作准确率。评估不替换当前模型；连续流误触和跨会话泛化需另测。
+可调用 `evaluate_leave_one_out(datasets, pipeline, n_states=6, segmentation=..., calibrate_rejection=True, progress=print)`（`hmm_gesture_studio.evaluation`），或点击 GUI“留出评估”。开启拒识时每类至少 4 次：外层留出的测试录制不进入内层训练、尺度估计或拒识标定；不开启的兼容模式仍需至少 3 次。各折训练保留手动训练框；留出测试仍对完整录制调用原识别流程（短促模式自动分段），漏触发计为未识别，不以人工选区掩盖检测失败。每次完整录制恰好测试一次。返回 `correct`、`total`、`accuracy`、`per_class`、`confusion`、`skipped_recordings` 及原录制索引的 `predictions`。单类的数值只是正样本通过率，不是未知动作准确率。评估不替换当前模型；连续流误触和跨会话泛化需另测。
 
-训练数据保留旧 JSON 的 `name`、`sample_rate_hz`、`repetitions[].data` 结构；新数据额外标记 `axes` / `units`。旧文件缺少采样率时按 25 Hz 解释。数据保存校验原始整数范围，不会因强制转为 int16 而静默溢出；写入采用原子替换，并拒绝净化文件名碰撞。GUI 对已有同名数据先询问追加。
+训练数据保留旧 JSON 的 `name`、`sample_rate_hz`、`repetitions[].data` 结构；新数据额外标记 `axes` / `units`。每次重复可选 `training_region: [start, end]`，为零起点、半开样本索引区间，必须满足 `0 <= start < end <= len(data)`；缺失或 `null` 使用原自动策略。Python `GestureDataset.training_regions` 为与 repetitions 对齐的列表（每项为二元组或 `None`），整体 `None` 表示全部自动。保存/追加/导入保留标注，不改变完整原始数组；更改已保存的框会使当前训练模型和评估失效。旧文件缺少采样率时按 25 Hz 解释。数据保存校验原始整数范围，不会因强制转为 int16 而静默溢出；写入采用原子替换，并拒绝净化文件名碰撞。GUI 对已有同名数据先询问追加。
 
 ## 导出格式 v1 / v2
 
@@ -162,7 +162,7 @@ bundle.save("exports/my-gestures.gesture.json")
 **v2** 保持 HMM 数组及 24 维特征不变，增加并严格校验：
 
 - `pipeline.filter_initialization`：`zero` 或 `steady`。`steady` 使用段首值的滤波稳态，避免从零启动造成假运动；v1 始终按 `zero` 解释，不改变旧模型分数。
-- `segmentation.mode`：`motion` 或 `impulse`；`post_roll` 为非负整数，impulse 必须正数。impulse 按原始相邻三轴加速度差的范数对比 `energy_threshold`，保留 `pre_roll + 1 + post_roll` 帧；无需连续多帧超过阈值或回到旧姿态。冷却从触发帧算起。训练和整段 `predict` 要求恰好一个完整窗口，流式窗口不因传入批次拆分而改变。
+- `segmentation.mode`：`motion` 或 `impulse`；`post_roll` 为非负整数，impulse 必须正数。impulse 按原始相邻三轴加速度差的范数对比 `energy_threshold`，保留 `pre_roll + 1 + post_roll` 帧；无需连续多帧超过阈值或回到旧姿态。冷却从触发帧算起。默认自动裁剪训练和整段 `predict` 要求恰好一个完整窗口；Studio 手动训练框仅覆盖训练取样，不改变推理。流式窗口不因传入批次拆分而改变。
 - 顶层 `rejection` 必须显式存在，可为 `null`（未标定），或覆盖所有手势名称的字典。每类含有限的 `score_floor`、非负 `peak_floor`、正整数 `min_samples`/`max_samples`。部分标签、未知字段、非法数值均拒绝加载；不要手写或用训练集分数冒充留出标定。
 
 `SegmentationConfig.for_sample_rate(rate, mode=..., energy_threshold=..., min_samples=...)` 供 Studio 明确应用时间预设，不从传感器数据猜测采样率；旧 `SegmentationConfig()` 的帧数默认值不变。

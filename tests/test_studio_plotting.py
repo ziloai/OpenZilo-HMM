@@ -4,8 +4,9 @@ from collections import deque
 import math
 import subprocess
 import sys
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from hmm_gesture_studio.plotting import (
     IMUPlot, MAX_SAMPLES, MAX_REGIONS, RollingIMUBuffer, axis_limits, curve_points,
@@ -15,6 +16,68 @@ from hmm_gesture_studio.plotting import (
 
 def row(value=0):
     return [value] * 6
+
+
+class FakeVariable:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+def make_recording_plot(callback=None):
+    plot = RecordingPlot.__new__(RecordingPlot)
+    plot.canvas = Mock()
+    plot.canvas.winfo_ismapped.return_value = True
+    plot.canvas.winfo_width.return_value = 720
+    plot.canvas.winfo_height.return_value = 400
+    plot._overlay = FakeVariable(True)
+    plot._selection_mode = FakeVariable(False)
+    plot._selection_button = Mock()
+    plot._reset_button = Mock()
+    plot._status = Mock()
+    plot._raw = plot._filtered = ()
+    plot._regions = ()
+    plot._training_region = None
+    plot._rate = 25.0
+    plot._min_samples = 1
+    plot._on_training_region = callback
+    plot._editable = True
+    plot._drag_anchor = plot._drag_bounds = plot._drag_region = None
+    plot._dirty = True
+    plot._sync_editing()
+    return plot
+
+
+class FakeRecordingController:
+    """Persist accepted proposals, then reload the authoritative preview."""
+    def __init__(self, samples, pipeline, segmentation=None):
+        self.samples = samples
+        self.pipeline = pipeline
+        self.segmentation = segmentation
+        self.region = None
+        self.rejected = []
+        self.callback = Mock(side_effect=self.select)
+        self.plot = make_recording_plot(self.callback)
+        self.show()
+
+    def show(self):
+        self.plot.set_editable(False)
+        self.plot.show_recording(self.samples, self.pipeline, segmentation=self.segmentation,
+                                 training_region=self.region)
+        self.plot.set_editable(True)
+
+    def select(self, region):
+        if region is not None and region[1] - region[0] < self.pipeline.min_samples:
+            self.rejected.append(region)
+            self.show()
+            return
+        self.region = region
+        self.show()
 
 
 class RollingIMUBufferTests(unittest.TestCase):
@@ -255,7 +318,7 @@ def guarded(name, *args, **kwargs):
         raise ImportError('Tk intentionally unavailable')
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded
-from hmm_gesture_studio.plotting import RollingIMUBuffer, IMUPlot
+from hmm_gesture_studio.plotting import RollingIMUBuffer, IMUPlot, RecordingPlot
 assert len(RollingIMUBuffer()) == 0
 """
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
@@ -264,19 +327,7 @@ assert len(RollingIMUBuffer()) == 0
 
 class RecordingPreviewTests(unittest.TestCase):
     def make_plot(self):
-        plot = RecordingPlot.__new__(RecordingPlot)
-        plot.canvas = Mock()
-        plot.canvas.winfo_ismapped.return_value = True
-        plot.canvas.winfo_width.return_value = 720
-        plot.canvas.winfo_height.return_value = 400
-        plot._overlay = Mock()
-        plot._overlay.get.return_value = True
-        plot._status = Mock()
-        plot._raw = plot._filtered = ()
-        plot._regions = ()
-        plot._rate = 25.0
-        plot._dirty = True
-        return plot
+        return make_recording_plot()
 
     def test_preview_matches_training_filter_without_modifying_raw(self):
         import numpy as np
@@ -325,6 +376,82 @@ class RecordingPreviewTests(unittest.TestCase):
         self.assertIn("无法训练", plot._status.set.call_args.args[0])
         self.assertEqual(plot._regions, ())
 
+    def test_manual_crop_overrides_automatic_filtering_and_preserves_raw(self):
+        import numpy as np
+        from hmm_gesture import PipelineConfig, SegmentationConfig
+        from hmm_gesture.preprocessing import make_pipeline
+        plot = self.make_plot()
+        data = np.zeros((100, 6), dtype=np.int16)
+        data[:, 2] = 2000
+        data[:, 3] = np.arange(100) * 200
+        data[50, 0] = 18000
+        original = data.copy()
+        pipeline = PipelineConfig(sample_rate_hz=100, cutoff_hz=30, median_kernel=1,
+                                  filter_initialization="steady")
+        segmentation = SegmentationConfig.for_sample_rate(100, mode="impulse", energy_threshold=8000)
+        plot.show_recording(data, pipeline, segmentation=segmentation)
+        self.assertEqual([(r.start_sample, r.end_sample) for r in plot._regions], [(38, 79)])
+        automatic = np.asarray(plot._filtered)
+        plot.show_recording(data, pipeline, segmentation=segmentation, training_region=[45, 65])
+        signal_filter, _ = make_pipeline(pipeline)
+        expected = signal_filter.apply(data)
+        expected[45:65] = signal_filter.apply(data[45:65])
+        np.testing.assert_array_equal(plot._filtered, expected)
+        self.assertFalse(np.array_equal(automatic[45:65], expected[45:65]))
+        np.testing.assert_array_equal(plot._raw, original)
+        np.testing.assert_array_equal(data, original)
+        self.assertEqual(plot._training_region, (45, 65))
+        self.assertEqual(plot._regions, (RecognitionRegion(45, 65, "手动训练窗口"),))
+        status = plot._status.set.call_args.args[0]
+        for text in ("手动训练窗口", "[45, 65)", "0.45–0.65 秒", "20 帧", "不改变实时触发"):
+            self.assertIn(text, status)
+        self.assertNotIn("无法训练", status)
+        plot.redraw()
+        self.assertEqual(plot.canvas.create_rectangle.call_count, 2)
+        # Restoring automatic mode must restore the original segment-local result.
+        plot.show_recording(data, pipeline, segmentation=segmentation)
+        np.testing.assert_array_equal(plot._filtered, automatic)
+        self.assertIsNone(plot._training_region)
+
+    def test_manual_crop_works_with_zero_windows_and_without_impulse_mode(self):
+        from hmm_gesture import PipelineConfig, SegmentationConfig
+        pipeline = PipelineConfig(median_kernel=1)
+        data = [row()] * 100
+        for segmentation in (None, SegmentationConfig.for_sample_rate(25, mode="impulse")):
+            with self.subTest(segmentation=segmentation):
+                plot = self.make_plot()
+                plot.show_recording(data, pipeline, segmentation=segmentation, training_region=(10, 40))
+                self.assertEqual(plot._regions, (RecognitionRegion(10, 40, "手动训练窗口"),))
+                status = plot._status.set.call_args.args[0]
+                self.assertIn("0.40–1.60 秒", status)
+                self.assertIn("30 帧", status)
+                self.assertNotIn("无法训练", status)
+
+    def test_short_manual_crop_is_shown_as_invalid_not_trainable(self):
+        from hmm_gesture import PipelineConfig
+        plot = self.make_plot()
+        pipeline = PipelineConfig(median_kernel=1)
+        plot.show_recording([row()] * 50, pipeline, training_region=(10, 13))
+        status = plot._status.set.call_args.args[0]
+        self.assertIn("3 帧", status)
+        self.assertIn(f"无法训练：手动窗口过短，至少需要 {pipeline.min_samples} 帧", status)
+        self.assertIn("不改变实时触发", status)
+        self.assertNotIn("只用框内训练", status)
+        plot.redraw()
+        self.assertEqual(plot.canvas.create_rectangle.call_count, 2)
+        self.assertTrue(all(call.kwargs["outline"] == "#c0392b"
+                            for call in plot.canvas.create_rectangle.call_args_list))
+        self.assertTrue(any("无法训练" in call.kwargs.get("text", "")
+                            for call in plot.canvas.create_text.call_args_list))
+
+    def test_manual_crop_uses_shared_strict_interval_validation(self):
+        from hmm_gesture import PipelineConfig
+        plot = self.make_plot()
+        pipeline = PipelineConfig()
+        for region in ((-1, 12), (1, 1), (0, 101), (True, 12), (1.0, 12), [1], "1,12"):
+            with self.subTest(region=region), self.assertRaises(ValueError):
+                plot.show_recording([row()] * 100, pipeline, training_region=region)
+
     def test_hidden_preview_redraw_is_deferred_and_invalid_input_rejected(self):
         from hmm_gesture import PipelineConfig
         plot = self.make_plot()
@@ -333,6 +460,263 @@ class RecordingPreviewTests(unittest.TestCase):
         plot.canvas.winfo_ismapped.return_value = False
         plot.redraw()
         plot.canvas.delete.assert_not_called()
+
+
+class RecordingSelectionTests(unittest.TestCase):
+    @staticmethod
+    def enable(plot):
+        plot._selection_mode.set(True)
+        plot._toggle_selection()
+
+    @staticmethod
+    def event(x, y=90):
+        return SimpleNamespace(x=x, y=y)
+
+    @staticmethod
+    def edge(index, count=101):
+        # Sample-cell edges are the same half-sample edges as the visible boxes.
+        return 72 + (index - 0.5) * 630 / (count - 1)
+
+    def make_plot(self):
+        from hmm_gesture import PipelineConfig
+        callback = Mock()
+        plot = make_recording_plot(callback)
+        plot.show_recording([row()] * 101, PipelineConfig(median_kernel=1))
+        self.enable(plot)
+        return plot, callback
+
+    def drag(self, plot, start, end, y=90):
+        plot._start_drag(self.event(start, y))
+        plot._move_drag(self.event(end, y))
+        plot._finish_drag(self.event(end, y))
+
+    def test_constructor_controls_and_bindings_without_tk_root(self):
+        ttk = SimpleNamespace(Frame=Mock(), Checkbutton=Mock(), Button=Mock(), Label=Mock())
+        tk = SimpleNamespace(ttk=ttk, BooleanVar=FakeVariable, StringVar=FakeVariable, Canvas=Mock())
+        callback = Mock()
+        with patch.dict(sys.modules, {"tkinter": tk, "tkinter.ttk": ttk}):
+            plot = RecordingPlot(None, on_training_region=callback)
+        self.assertIs(plot._on_training_region, callback)
+        self.assertEqual(ttk.Checkbutton.call_args.kwargs["text"], "手动框选")
+        self.assertEqual(ttk.Button.call_args.kwargs["text"], "恢复自动裁剪")
+        bindings = dict(call.args for call in plot.canvas.bind.call_args_list)
+        self.assertEqual(bindings["<ButtonPress-1>"], plot._start_drag)
+        self.assertEqual(bindings["<B1-Motion>"], plot._move_drag)
+        self.assertEqual(bindings["<ButtonRelease-1>"], plot._finish_drag)
+        plot._selection_button.configure.assert_called_with(state="disabled")
+        plot._reset_button.configure.assert_called_with(state="disabled")
+
+    def test_drag_mapping_full_take_reverse_exact_edges_and_clamping_on_both_charts(self):
+        cases = ((72, 702, (0, 101)), (702, 72, (0, 101)),
+                 (-100, 900, (0, 101)), (900, -100, (0, 101)),
+                 (self.edge(10), self.edge(50), (10, 50)),
+                 (self.edge(50), self.edge(10), (10, 50)),
+                 (self.edge(80), 702, (80, 101)),
+                 (701.9, 900, (100, 101)), (-100, 72.1, (0, 1)),
+                 (72 + 10 * 6.3, 72 + 49 * 6.3, (10, 50)))
+        for y in (90, 275):
+            for start, end, expected in cases:
+                with self.subTest(y=y, start=start, end=end):
+                    plot, callback = self.make_plot()
+                    self.drag(plot, start, end, y)
+                    callback.assert_called_once_with(expected)
+                    self.assertTrue(all(type(i) is int for i in callback.call_args.args[0]))
+                    self.assertIsNone(plot._drag_region)
+                    # Callback-only proposals do not optimistically change the view.
+                    self.assertIsNone(plot._training_region)
+
+    def test_drag_previews_one_shared_box_then_controller_replaces_and_resets(self):
+        import numpy as np
+        from hmm_gesture import PipelineConfig, SegmentationConfig
+        data = np.zeros((101, 6), dtype=np.int16)
+        original = data.copy()
+        controller = FakeRecordingController(
+            data, PipelineConfig(median_kernel=1), SegmentationConfig.for_sample_rate(25, mode="impulse"))
+        plot = controller.plot
+        self.assertIn("当前 0 个完整窗口", plot._status.set.call_args.args[0])
+        self.enable(plot)
+        plot._start_drag(self.event(self.edge(10)))
+        plot._move_drag(self.event(self.edge(50)))
+        self.assertEqual(plot._drag_region, (10, 50))
+        controller.callback.assert_not_called()
+        plot.redraw()
+        boxes = plot.canvas.create_rectangle.call_args_list
+        self.assertEqual(len(boxes), 2)
+        for call, (top, bottom) in zip(boxes, ((32, 160), (217, 345))):
+            self.assertAlmostEqual(call.args[0], self.edge(10))
+            self.assertAlmostEqual(call.args[2], self.edge(50))
+            self.assertEqual((call.args[1], call.args[3]), (top, bottom))
+        self.assertTrue(any("手动训练窗口（预览）" in call.kwargs.get("text", "")
+                            for call in plot.canvas.create_text.call_args_list))
+        plot._finish_drag(self.event(self.edge(50)))
+        controller.callback.assert_called_once_with((10, 50))
+        self.assertEqual(controller.region, (10, 50))
+        self.assertEqual(plot._training_region, (10, 50))
+        plot._reset_button.configure.assert_called_with(state="normal")
+        # Controller reloads keep the toggle active so a re-drag replaces the crop.
+        self.assertTrue(plot._selection_mode.get())
+        plot.canvas.create_rectangle.reset_mock()
+        plot._start_drag(self.event(self.edge(80), 275))
+        plot._move_drag(self.event(self.edge(40), 275))
+        plot.redraw()
+        self.assertEqual(plot.canvas.create_rectangle.call_count, 2)
+        plot._finish_drag(self.event(self.edge(40), 275))
+        self.assertEqual(controller.region, (40, 80))
+        self.assertEqual(plot._regions, (RecognitionRegion(40, 80, "手动训练窗口"),))
+        plot._restore_automatic()
+        controller.callback.assert_called_with(None)
+        self.assertIsNone(controller.region)
+        self.assertEqual(plot._regions, ())
+        self.assertIn("当前 0 个完整窗口", plot._status.set.call_args.args[0])
+        self.assertFalse(plot._selection_mode.get())
+        plot._reset_button.configure.assert_called_with(state="disabled")
+        plot._restore_automatic()  # Already automatic: no redundant callback.
+        self.assertEqual(controller.callback.call_count, 3)
+        np.testing.assert_array_equal(data, original)
+        np.testing.assert_array_equal(plot._raw, original)
+
+    def test_clicks_no_horizontal_motion_and_vertical_margins_are_ignored(self):
+        plot, callback = self.make_plot()
+        plot._start_drag(self.event(200))
+        plot._finish_drag(self.event(200, 110))
+        plot._start_drag(self.event(200))
+        plot._move_drag(self.event(400))
+        plot._finish_drag(self.event(200))  # Moving back to the anchor is also empty.
+        for y in (0, 31, 161, 200, 216, 346, 400):
+            plot._start_drag(self.event(100, y))
+            plot._finish_drag(self.event(600))
+            plot._start_drag(self.event(100))
+            plot._move_drag(self.event(600, y))
+            self.assertIsNone(plot._drag_region)
+            plot._finish_drag(self.event(600, y))
+        self.drag(plot, 702, 900)  # Both positions clamp to the same edge.
+        self.drag(plot, -100, 72)
+        callback.assert_not_called()
+
+    def test_disabled_read_only_short_and_empty_previews_do_not_edit(self):
+        from hmm_gesture import PipelineConfig
+        pipeline = PipelineConfig(median_kernel=1)
+        for size in (0, pipeline.min_samples - 1, 101):
+            for editable, has_callback in ((False, True), (True, False), (True, True)):
+                if size == 101 and editable and has_callback:
+                    continue
+                with self.subTest(size=size, editable=editable, callback=has_callback):
+                    callback = Mock()
+                    plot = make_recording_plot(callback if has_callback else None)
+                    if size:
+                        plot.show_recording([row()] * size, pipeline, training_region=(0, size))
+                    plot.set_editable(editable)
+                    self.enable(plot)
+                    self.assertFalse(plot._selection_mode.get())
+                    plot._selection_button.configure.assert_called_with(state="disabled")
+                    plot._reset_button.configure.assert_called_with(state="disabled")
+                    self.drag(plot, 72, 702)
+                    plot._restore_automatic()
+                    callback.assert_not_called()
+                    self.assertIsNone(plot._drag_anchor)
+        # The exact minimum-length take remains editable, including its last sample.
+        callback = Mock()
+        plot = make_recording_plot(callback)
+        plot.show_recording([row()] * pipeline.min_samples, pipeline)
+        self.enable(plot)
+        self.drag(plot, 72, 702)
+        callback.assert_called_once_with((0, pipeline.min_samples))
+
+    def test_temporary_disable_and_recording_switch_preserve_authoritative_regions(self):
+        from hmm_gesture import PipelineConfig
+        plot, callback = self.make_plot()
+        pipeline = PipelineConfig(median_kernel=1)
+        plot.show_recording([row()] * 101, pipeline, training_region=(10, 50))
+        raw, filtered, regions = plot._raw, plot._filtered, plot._regions
+        plot._start_drag(self.event(100))
+        plot._move_drag(self.event(500))
+        plot.set_editable(False)
+        self.assertIsNone(plot._drag_region)
+        self.assertTrue(plot._selection_mode.get())
+        self.assertEqual((plot._raw, plot._filtered, plot._regions), (raw, filtered, regions))
+        self.assertEqual(plot._training_region, (10, 50))
+        plot._selection_button.configure.assert_called_with(state="disabled")
+        plot._reset_button.configure.assert_called_with(state="disabled")
+        plot._finish_drag(self.event(600))
+        plot._restore_automatic()
+        callback.assert_not_called()
+        # Mimic GUI refreshes and switching repetitions with separate saved crops.
+        for count, region in ((101, (10, 50)), (200, (70, 150)), (101, (10, 50))):
+            plot.set_editable(False)
+            plot.show_recording([row()] * count, pipeline, training_region=region)
+            plot.set_editable(True)
+            self.assertEqual(plot._training_region, region)
+            self.assertEqual(plot._regions, (RecognitionRegion(*region, "手动训练窗口"),))
+            self.assertTrue(plot._selection_mode.get())
+            plot._reset_button.configure.assert_called_with(state="normal")
+        callback.assert_not_called()
+        self.drag(plot, self.edge(40), self.edge(80))
+        callback.assert_called_once_with((40, 80))
+
+    def test_short_drag_is_invalid_preview_and_controller_rejects_without_commit(self):
+        from hmm_gesture import PipelineConfig
+        controller = FakeRecordingController([row()] * 101, PipelineConfig(median_kernel=1))
+        plot = controller.plot
+        self.enable(plot)
+        self.drag(plot, self.edge(10), self.edge(50))
+        plot.canvas.create_rectangle.reset_mock()
+        plot.canvas.create_text.reset_mock()
+        plot._start_drag(self.event(self.edge(20)))
+        plot._move_drag(self.event(self.edge(23)))
+        plot.redraw()
+        self.assertEqual(plot.canvas.create_rectangle.call_count, 2)
+        self.assertTrue(all(call.kwargs["outline"] == "#c0392b"
+                            for call in plot.canvas.create_rectangle.call_args_list))
+        self.assertTrue(any("无法训练，至少 12 帧" in call.kwargs.get("text", "")
+                            for call in plot.canvas.create_text.call_args_list))
+        plot._finish_drag(self.event(self.edge(23)))
+        self.assertEqual(controller.rejected, [(20, 23)])
+        self.assertEqual(controller.region, (10, 50))
+        self.assertEqual(plot._training_region, (10, 50))
+        self.assertIsNone(plot._drag_region)
+
+    def test_switch_clear_disable_toggle_resize_and_cancel_discard_unfinished_drag(self):
+        from hmm_gesture import PipelineConfig
+        for action in ("switch", "clear", "disable", "toggle", "resize", "cancel", "restore"):
+            with self.subTest(action=action):
+                plot, callback = self.make_plot()
+                plot.show_recording([row()] * 101, PipelineConfig(median_kernel=1), training_region=(5, 40))
+                plot._start_drag(self.event(100))
+                plot._move_drag(self.event(500))
+                self.assertIsNotNone(plot._drag_region)
+                if action == "switch":
+                    plot.show_recording([row(5)] * 200, PipelineConfig(median_kernel=1))
+                elif action == "clear":
+                    plot.clear()
+                elif action == "disable":
+                    plot.set_editable(False)
+                    plot.set_editable(True)
+                    self.enable(plot)
+                elif action == "toggle":
+                    plot._selection_mode.set(False)
+                    plot._toggle_selection()
+                    self.enable(plot)
+                elif action == "resize":
+                    plot._invalidate(self.event(0))
+                elif action == "cancel":
+                    plot._cancel_drag()
+                else:
+                    plot._restore_automatic()
+                    callback.assert_called_once_with(None)
+                    callback.reset_mock()
+                self.assertIsNone(plot._drag_anchor)
+                self.assertIsNone(plot._drag_region)
+                plot._finish_drag(self.event(600))
+                callback.assert_not_called()
+
+    def test_hidden_or_tiny_plot_does_not_start_drag(self):
+        for attribute, value in (("winfo_ismapped", False), ("winfo_width", 100), ("winfo_height", 100)):
+            with self.subTest(attribute=attribute):
+                plot, callback = self.make_plot()
+                getattr(plot.canvas, attribute).return_value = value
+                self.drag(plot, 72, 702)
+                callback.assert_not_called()
+                self.assertIsNone(plot._drag_anchor)
 
 
 if __name__ == "__main__":

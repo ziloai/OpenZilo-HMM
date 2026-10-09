@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Display-only IMU plotting. Importing this module does not import Tk.
+"""IMU plotting and manual training-region selection; no Tk import at module load.
 
 All IMUPlot methods belong on the GUI thread. Call redraw() from the GUI poll;
 no timers or worker threads are created here. Time is sample-relative, not a
@@ -282,9 +282,12 @@ class RecordingPlot:
 
     Filtered values stay floating point (a low-pass can overshoot int16).
     Raw recording data is never modified. Canvas geometry is pixel-bounded.
+    Selection callbacks propose half-open intervals; the controller validates and
+    persists them, then calls show_recording again. Without a callback this is a
+    read-only preview, including when a saved manual training region is shown.
     """
 
-    def __init__(self, parent):
+    def __init__(self, parent, *, on_training_region=None):
         import tkinter as tk
         from tkinter import ttk
 
@@ -292,6 +295,15 @@ class RecordingPlot:
         self._overlay = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.widget, text="叠加原始波形（浅色虚线）；滤波后为实线",
                         variable=self._overlay, command=self._invalidate).pack(anchor="w")
+        controls = ttk.Frame(self.widget)
+        controls.pack(fill="x")
+        self._selection_mode = tk.BooleanVar(value=False)
+        self._selection_button = ttk.Checkbutton(
+            controls, text="手动框选", variable=self._selection_mode, command=self._toggle_selection)
+        self._selection_button.pack(side="left")
+        self._reset_button = ttk.Button(controls, text="恢复自动裁剪", command=self._restore_automatic)
+        self._reset_button.pack(side="left", padx=6)
+        ttk.Label(controls, text="在任一图内水平拖动；再次拖动替换，原始数据不变。").pack(side="left")
         self.canvas = tk.Canvas(self.widget, background="#ffffff", highlightthickness=0,
                                 width=720, height=400)
         self.canvas.pack(fill="both", expand=True)
@@ -299,34 +311,153 @@ class RecordingPlot:
         ttk.Label(self.widget, textvariable=self._status, wraplength=900).pack(anchor="w")
         self._raw = self._filtered = ()
         self._regions = ()
+        self._training_region = None
         self._rate = 25.0
+        self._min_samples = 1
+        self._on_training_region = on_training_region
+        self._editable = True
+        self._drag_anchor = self._drag_bounds = self._drag_region = None
         self._dirty = True
         self.canvas.bind("<Configure>", self._invalidate)
         self.canvas.bind("<Map>", self._invalidate)
+        self.canvas.bind("<Unmap>", self._cancel_drag)
+        self.canvas.bind("<Escape>", self._cancel_drag)
+        self.canvas.bind("<ButtonPress-1>", self._start_drag)
+        self.canvas.bind("<B1-Motion>", self._move_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._finish_drag)
+        self._sync_editing()
 
     def _invalidate(self, event=None):
+        if event is not None:
+            self._cancel_drag()  # Geometry changes invalidate the drag's coordinate system.
         self._dirty = True
 
+    def _cancel_drag(self, event=None):
+        self._drag_anchor = self._drag_bounds = self._drag_region = None
+        self._dirty = True
+
+    def _can_edit(self):
+        return (self._editable and self._on_training_region is not None
+                and bool(self._raw) and len(self._raw) >= self._min_samples)
+
+    def _sync_editing(self):
+        enabled = self._can_edit()
+        if not enabled:
+            self._cancel_drag()
+        if self._on_training_region is None or not self._raw or len(self._raw) < self._min_samples:
+            self._selection_mode.set(False)
+        self._selection_button.configure(state="normal" if enabled else "disabled")
+        self._reset_button.configure(
+            state="normal" if enabled and self._training_region is not None else "disabled")
+        self.canvas.configure(cursor="crosshair" if enabled and self._selection_mode.get() else "")
+
+    def set_editable(self, editable: bool):
+        """Lock edits without changing the saved crop or a temporary lock's mode."""
+        self._editable = bool(editable)
+        self._sync_editing()
+
+    def _toggle_selection(self):
+        self._cancel_drag()
+        if not self._can_edit():
+            self._selection_mode.set(False)
+        self._sync_editing()
+
+    def _restore_automatic(self):
+        if not self._can_edit() or self._training_region is None:
+            return
+        self._cancel_drag()
+        self._selection_mode.set(False)
+        self._sync_editing()
+        self._on_training_region(None)
+
+    def _chart_bounds(self):
+        width, height = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if width < 180 or height < 160:
+            return ()
+        span = (height - 30) / 2
+        return tuple((72, group * span + 32, width - 18, (group + 1) * span - 25)
+                     for group in range(2))
+
+    def _start_drag(self, event):
+        self._cancel_drag()
+        if not self._can_edit() or not self._selection_mode.get() or not self.canvas.winfo_ismapped():
+            return
+        for bounds in self._chart_bounds():
+            left, top, right, bottom = bounds
+            if top <= event.y <= bottom:
+                self._drag_bounds = bounds
+                self._drag_anchor = max(left, min(right, event.x))
+                self.canvas.focus_set()
+                break
+
+    def _move_drag(self, event):
+        if not self._can_edit() or not self._selection_mode.get():
+            self._cancel_drag()
+            return
+        if self._drag_anchor is None:
+            return
+        left, top, right, bottom = self._drag_bounds
+        self._drag_region = None
+        x = max(left, min(right, event.x))
+        if top <= event.y <= bottom and x != self._drag_anchor:
+            low, high = sorted((self._drag_anchor, x))
+            # Select sample cells touched by the drag. Their half-sample edges
+            # match region_bounds; the rightmost cell ends at len(raw), not n-1.
+            # The tiny tolerance keeps exact cell-edge drags stable under float math.
+            scale = (len(self._raw) - 1) / (right - left)
+            start = max(0, math.floor((low - left) * scale + 0.5 + 1e-9))
+            end = min(len(self._raw), math.ceil((high - left) * scale + 0.5 - 1e-9))
+            if start < end:
+                self._drag_region = (start, end)
+        self._dirty = True
+
+    def _finish_drag(self, event):
+        self._move_drag(event)
+        region = self._drag_region
+        self._cancel_drag()
+        if region is not None:
+            # Do not commit optimistically: the controller also checks min_samples
+            # and may reject a short crop without changing the saved recording.
+            self._on_training_region(region)
+
     def clear(self, message="暂无录制波形"):
+        self._cancel_drag()
         self._raw = self._filtered = ()
         self._regions = ()
+        self._training_region = None
+        self._sync_editing()
         self._status.set(message)
         self._dirty = True
 
-    def show_recording(self, samples, pipeline, *, segmentation=None):
+    def show_recording(self, samples, pipeline, *, segmentation=None, training_region=None):
         import numpy as np
         from hmm_gesture.preprocessing import make_pipeline, validate_samples
         from hmm_gesture.segmentation import MotionSegmenter, impulse_peak, prepare_recording
+        from .datasets import validate_training_region
 
+        self._cancel_drag()  # A switch/reload must never finish an earlier recording's drag.
         data = validate_samples(samples)
+        training_region = validate_training_region(training_region, len(data))
         signal_filter, _ = make_pipeline(pipeline)
         filtered = signal_filter.apply(data)
-        self._regions = ()
+        regions = ()
         detail = "整段参与训练"
-        if segmentation is not None and segmentation.mode == "impulse":
+        if training_region is not None:
+            start, end = training_region
+            regions = (RecognitionRegion(start, end, "手动训练窗口"),)
+            filtered[start:end] = signal_filter.apply(data[start:end])
+            detail = (f"手动训练窗口：样本 [{start}, {end})，"
+                      f"{start / pipeline.sample_rate_hz:.2f}–{end / pipeline.sample_rate_hz:.2f} 秒，"
+                      f"{end - start} 帧")
+            if end - start < pipeline.min_samples:
+                detail += f"；无法训练：手动窗口过短，至少需要 {pipeline.min_samples} 帧"
+            else:
+                detail += "；只用框内训练，框外不参与"
+            detail += "；手动裁剪不改变实时触发条件"
+        elif segmentation is not None and segmentation.mode == "impulse":
             segments = MotionSegmenter(**asdict(segmentation)).feed_segments(data)
-            self._regions = tuple(RecognitionRegion(s.start_sample, s.end_sample, "训练窗口")
-                                  for s in segments[:MAX_REGIONS])
+            regions = tuple(RecognitionRegion(s.start_sample, s.end_sample, "训练窗口")
+                            for s in segments[:MAX_REGIONS])
             # Inside each box show EXACTLY what the model sees after segment-local
             # filtering; outside is only a whole-take context preview.
             for segment in segments:
@@ -339,7 +470,11 @@ class RecordingPlot:
                 detail += f"（仅显示前 {MAX_REGIONS} 框）"
         self._raw = tuple(map(tuple, data))
         self._filtered = tuple(map(tuple, filtered))
+        self._regions = regions
+        self._training_region = training_region
         self._rate = pipeline.sample_rate_hz
+        self._min_samples = pipeline.min_samples
+        self._sync_editing()
         peak = impulse_peak(data)
         attenuation = ""
         if peak > 1000:
@@ -363,11 +498,14 @@ class RecordingPlot:
         c.delete("all")
         seconds = max(1, len(self._raw) - 1) / self._rate
         overlay = self._overlay.get()
+        regions = self._regions
+        if self._drag_region is not None:
+            regions = (RecognitionRegion(*self._drag_region, "手动训练窗口（预览）"),)
+        chart_bounds = self._chart_bounds()
         for group, title in enumerate(("加速度 · 滤波后", "陀螺仪 · 滤波后")):
             base = group * (height - 30) / 2
-            left, right = 72, width - 18
-            top, bottom = base + 32, base + (height - 30) / 2 - 25
-            bounds = left, top, right, bottom
+            bounds = chart_bounds[group]
+            left, top, right, bottom = bounds
             axes = range(group * 3, group * 3 + 3)
             limits = axis_limits(self._filtered + (self._raw if overlay else ()), axes)
             c.create_text(left, base + 12, text=title, anchor="w", fill="#333333")
@@ -392,11 +530,19 @@ class RecordingPlot:
                     elif points:
                         x, y = points
                         c.create_oval(x - 2, y - 2, x + 2, y + 2, fill=color, outline=color)
-            for region in self._regions:
+            for region in regions:
                 box = region_bounds(region, next_sample=len(self._raw), sample_count=len(self._raw),
                                     sample_rate_hz=self._rate, seconds=seconds, bounds=bounds)
                 if box is not None:
-                    c.create_rectangle(*box, outline="#8e44ad", width=2, dash=(5, 3))
-                    c.create_text(box[0] + 3, top + 3, text=region.label, anchor="nw", fill="#7d3c98")
-        c.create_text(width / 2, height - 12, text="录制开始后 / 秒（完整录制；短促模式的训练窗口用紫框标出）", fill="#555555")
+                    label = region.label
+                    short = ((self._training_region is not None or self._drag_region is not None)
+                             and region.end_sample - region.start_sample < self._min_samples)
+                    if self._drag_region is not None:
+                        label += f" · {region.end_sample - region.start_sample} 帧"
+                    if short:
+                        label += f"（无法训练，至少 {self._min_samples} 帧）"
+                    c.create_rectangle(*box, outline="#c0392b" if short else "#8e44ad", width=2, dash=(5, 3))
+                    c.create_text(box[0] + 3, top + 3, text=label, anchor="nw",
+                                  fill="#c0392b" if short else "#7d3c98")
+        c.create_text(width / 2, height - 12, text="录制开始后 / 秒（完整录制；训练窗口用虚线框标出）", fill="#555555")
         self._dirty = False
