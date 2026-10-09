@@ -78,7 +78,8 @@ class WorkerTests(unittest.TestCase):
         self.stack.enter_context(patch.object(device, "RECONNECT_DELAYS", (0.01, 0.02, 0.04)))
         self.system = self.stack.enter_context(patch.object(
             sdk, "get_system_info", new_callable=AsyncMock,
-            return_value=SimpleNamespace(model="ring", firmware_version="1", battery_percent=90),
+            return_value=SimpleNamespace(model="ring", firmware_version="1", battery_percent=90,
+                                         battery_charging=False),
         ))
         self.start_report = self.stack.enter_context(patch.object(
             sdk, "start_sensor_report", new_callable=AsyncMock, return_value=self.start_info,
@@ -188,7 +189,7 @@ class WorkerTests(unittest.TestCase):
         self.worker.connect("manual-address")
         self.assertEqual(self.event("connected"), {
             "address": "manual-address", "model": "ring",
-            "firmware_version": "1", "battery_percent": 90,
+            "firmware_version": "1", "battery_percent": 90, "battery_charging": False,
         })
 
     def streaming(self):
@@ -206,6 +207,48 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker._audio_directory, directory)
         self.assertFalse(self.worker._audio_busy)
         self.assertIsNone(self.worker._audio_task)
+
+    def test_battery_refresh_does_not_block_imu_and_reports_charging(self):
+        self.stack.enter_context(patch.object(device, "BATTERY_REFRESH_INTERVAL", 0.01))
+        requested = threading.Event()
+        release = self.gate()
+
+        async def get_info(ring, **kwargs):
+            if "timeout_s" not in kwargs:
+                return self.system.return_value  # Initial connection info.
+            self.assertEqual(kwargs["timeout_s"], device.BATTERY_TIMEOUT)
+            requested.set()
+            await release.wait()
+            return SimpleNamespace(battery_percent=42, battery_charging=True)
+
+        self.system.side_effect = get_info
+        self.streaming()
+        self.assertTrue(requested.wait(3))
+        # Battery read is still waiting, but the sole IMU consumer stays active.
+        self.feed(self.batch(sequence=1, timestamp=120))
+        self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.assertEqual(self.max_active, 1)
+        self.worker._loop.call_soon_threadsafe(release.set)
+        self.assertEqual(self.event("battery"), {"battery_percent": 42, "battery_charging": True})
+        self.assertTrue(self.rings[-1].is_connected)
+
+    def test_disconnect_cancels_battery_monitor_before_finishing_session(self):
+        started, stopped = threading.Event(), threading.Event()
+
+        async def monitor(ring):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        self.stack.enter_context(patch.object(self.worker, "_monitor_battery", side_effect=monitor))
+        self.connect()
+        self.assertTrue(started.wait(3))
+        self.worker.disconnect()
+        self.event("disconnected")
+        self.assertTrue(stopped.is_set())
 
     def test_scan_and_duplicate_request(self):
         self.scan.return_value = [SimpleNamespace(name="Ring", address="A", rssi=-61)]
@@ -840,6 +883,100 @@ class WorkerTests(unittest.TestCase):
         worker.stop_audio()
         worker.disconnect()
         self.assertIsNone(worker._thread)
+
+
+class BatteryMonitorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.events = []
+        self.worker = RingWorker(lambda event, payload: self.events.append((event, payload)))
+        self.ring = SimpleNamespace(is_connected=True)
+        self.ticks, self.ready = asyncio.Queue(), asyncio.Queue()
+        self.delays = []
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+
+        async def pause(delay):
+            self.delays.append(delay)
+            self.ready.put_nowait(None)
+            await self.ticks.get()
+
+        self.stack.enter_context(patch.object(device.asyncio, "sleep", side_effect=pause))
+        self.info = SimpleNamespace(battery_percent=88, battery_charging=False)
+        self.query = self.stack.enter_context(patch.object(sdk, "get_system_info",
+                                                          new_callable=AsyncMock, return_value=self.info))
+        self.task = asyncio.create_task(self.worker._monitor_battery(self.ring))
+        self.addAsyncCleanup(self.stop)
+        await asyncio.wait_for(self.ready.get(), 1)
+
+    async def stop(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+
+    async def tick(self):
+        self.ticks.put_nowait(None)
+        await asyncio.wait_for(self.ready.get(), 1)
+
+    async def test_periodic_query_waits_one_minute_and_uses_bounded_timeout(self):
+        self.query.assert_not_awaited()  # No duplicate query just after connecting.
+        self.assertEqual(self.delays, [60.0])
+        await self.tick()
+        self.query.assert_awaited_once_with(self.ring, timeout_s=device.BATTERY_TIMEOUT)
+        self.assertEqual(self.events, [("battery", {"battery_percent": 88, "battery_charging": False})])
+        self.query.return_value = SimpleNamespace(battery_percent=0, battery_charging=True)
+        await self.tick()
+        self.assertEqual(self.events[-1], ("battery", {"battery_percent": 0, "battery_charging": True}))
+        self.assertEqual(self.delays, [60.0] * 3)
+
+    async def test_audio_transfer_and_disconnection_defer_queries_but_listening_does_not(self):
+        self.worker._audio_busy = True
+        await self.tick()
+        self.query.assert_not_awaited()
+        self.worker._audio_busy = False
+        self.ring.is_connected = False
+        await self.tick()
+        self.query.assert_not_awaited()
+        self.ring.is_connected = True
+        self.worker._audio_armed = True  # Passive listening does not reserve the link.
+        await self.tick()
+        self.query.assert_awaited_once()
+
+    async def test_optional_read_failures_clear_stale_value_and_retry_without_ending_session(self):
+        for error in (sdk.TimeoutError("timeout"), sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY),
+                      sdk.ProtocolError("bad response"), sdk.TransportError("write failed")):
+            with self.subTest(error=type(error).__name__):
+                self.query.side_effect = [error, self.info]
+                self.events.clear()
+                await self.tick()
+                self.assertEqual(self.events[0], ("battery", {"battery_percent": None, "battery_charging": None}))
+                self.assertEqual(self.events[1][0], "warning")
+                self.assertFalse(self.task.done())
+                self.assertTrue(self.ring.is_connected)
+                await self.tick()
+                self.assertEqual(self.events[-1], ("battery", {"battery_percent": 88, "battery_charging": False}))
+
+    async def test_pending_battery_request_is_cancelled_without_late_results(self):
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def query(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        self.query.side_effect = query
+        self.ticks.put_nowait(None)
+        await asyncio.wait_for(started.wait(), 1)
+        await self.stop()
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(self.events, [])
+
+    async def test_battery_events_are_suppressed_during_disconnect_and_close(self):
+        for flag in ("_disconnecting", "_closing"):
+            setattr(self.worker, flag, True)
+            self.worker._emit("battery", {"battery_percent": 88})
+            setattr(self.worker, flag, False)
+        self.assertEqual(self.events, [])
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):

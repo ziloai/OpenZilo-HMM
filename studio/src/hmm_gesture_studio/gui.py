@@ -168,7 +168,12 @@ class Studio:
         self.button(device, "断开 / 取消连接", self.disconnect).grid(row=0, column=4)
         self.button(device, "清空设备历史", self.clear_device_history).grid(row=0, column=5, padx=5)
         self.status = tk.StringVar(value="未连接；可扫描或直接输入地址")
-        ttk.Label(device, textvariable=self.status).grid(row=1, column=0, columnspan=5, sticky="w")
+        connection_status = ttk.Frame(device)
+        connection_status.grid(row=1, column=0, columnspan=6, sticky="ew")
+        ttk.Label(connection_status, textvariable=self.status).pack(side="left", fill="x", expand=True)
+        self.battery_text = tk.StringVar(value="电量：—")
+        self.battery_label = ttk.Label(connection_status, textvariable=self.battery_text, foreground="#777777")
+        self.battery_label.pack(side="right", padx=(10, 0))
         self.raw = tk.StringVar(value="ax / ay / az / gx / gy / gz：—；样本数：0")
         ttk.Label(device, textvariable=self.raw).grid(row=2, column=0, columnspan=5, sticky="w")
         self.stream_text = tk.StringVar(value="IMU 未就绪；连接后自动等待手势模式")
@@ -701,6 +706,7 @@ class Studio:
         self.clear_takes()
         self.stop_live()
         self.connecting = True
+        self.set_battery_status()
         self.status.set("正在连接；可以点击断开取消")
         if not self.request(lambda: self.worker.connect(address)):
             self.connecting = False
@@ -716,6 +722,7 @@ class Studio:
         self.connected = False
         self.connecting = False
         self.actual_rate = None
+        self.set_battery_status()
         self.status.set("正在断开")
         self.request(self.worker.disconnect)
 
@@ -1066,6 +1073,25 @@ class Studio:
         if active and self.live.get() and self.recognizer is None and self.audio_state in {"idle", "listening"}:
             self.toggle_live()
 
+    def set_battery_status(self, payload=None):
+        """Render only reported values; 0% is valid, absent/out-of-range is not."""
+        text, color = "电量：—", "#777777"
+        if payload is not None:
+            percent = payload.get("battery_percent")
+            charging = payload.get("battery_charging") is True
+            valid = type(percent) is int and 0 <= percent <= 100
+            text = f"电量：{percent}%" if valid else "电量：未知"
+            if charging:
+                text += " · 充电中"
+                color = "#187b3c"
+            elif valid and percent <= 20:
+                text += " · 低电量"
+                color = "#c0392b"
+            elif valid:
+                color = "#333333"
+        self.battery_text.set(text)
+        self.battery_label.configure(foreground=color)
+
     def handle(self, event, payload):
         if event == "samples":
             self.samples(payload)
@@ -1078,6 +1104,7 @@ class Studio:
                 self.request(self.worker.disconnect)
                 return
             self.connected, self.connecting = True, False
+            self.set_battery_status(payload)
             self.remember_device(payload)
             self.set_stream_state({"state": "waiting", "message": "BLE 已连接，正在等待新的 IMU 数据…"})
             self.count = 0
@@ -1089,16 +1116,21 @@ class Studio:
                             f"{payload.get('firmware_version', '')}")
             self.set_audio_state({"state": self.audio_state, "message": self.audio_text.get()})
             self.log(self.status.get())
+        elif event == "battery":
+            if self.connected and not self.closing:
+                self.set_battery_status(payload)
         elif event == "stream_state":
             self.set_stream_state(payload)
         elif event == "reconnecting":
             self.connected, self.connecting = False, True
+            self.set_battery_status()
             self.set_stream_state({"state": "waiting", "message": "连接中断，正在自动重连"})
             self.status.set(payload["message"])
             self.set_audio_state({"state": self.audio_state, "message": self.audio_text.get()})
             self.log(payload["message"])
         elif event == "disconnected":
             self.connected = self.connecting = False
+            self.set_battery_status()
             self.set_stream_state({"state": "waiting", "message": "IMU 未连接"})
             self.set_audio_state({"state": self.audio_state, "message": self.audio_text.get()})
             self.status.set("已断开；未完成的手势录制已取消")
@@ -1166,6 +1198,7 @@ class Studio:
         self.executor.shutdown(wait=False, cancel_futures=True)
         for widget in self.locked:
             widget.configure(state="disabled")
+        self.set_battery_status()
         self.status.set("正在关闭设备，最多等待 8 秒…")
         try:
             future = self.worker.close()

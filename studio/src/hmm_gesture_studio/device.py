@@ -19,6 +19,8 @@ HOUSEKEEPING_INTERVAL = 0.25
 RECONNECT_DELAYS = (1.0, 2.0, 4.0, 8.0)
 AUDIO_TIMEOUT = 2.0
 CLEANUP_TIMEOUT = 1.0
+BATTERY_REFRESH_INTERVAL = 60.0
+BATTERY_TIMEOUT = 2.0
 
 
 class _StudioClient(sdk.OpenZiloClient):
@@ -78,6 +80,11 @@ def _drain(ring, command):
     # Pinned SDK has no public drain API. Only call with no consumer of this
     # command: in particular IMU restart happens in its sole consumer task.
     ring._drain_queue(int(command))
+
+
+def _battery_status(info):
+    return {"battery_percent": getattr(info, "battery_percent", None),
+            "battery_charging": getattr(info, "battery_charging", None)}
 
 
 class RingWorker:
@@ -172,7 +179,7 @@ class RingWorker:
                     self._closed.set_exception(failure)
 
     def _emit(self, event: str, payload: object) -> None:
-        if event in {"connected", "samples", "devices"} and (
+        if event in {"connected", "samples", "devices", "battery"} and (
             self._closing or self._disconnecting
         ):
             return
@@ -321,7 +328,7 @@ class RingWorker:
                     self._emit("connected", {
                         "address": address, "model": info.model,
                         "firmware_version": info.firmware_version,
-                        "battery_percent": info.battery_percent,
+                        **_battery_status(info),
                     })
                     await self._session(ring)
                 except BaseException as exc:
@@ -355,8 +362,10 @@ class RingWorker:
         self._audio("idle", "Audio reception is off.")
         owner = asyncio.create_task(self._own_stream(ring))
         monitor = asyncio.create_task(self._housekeeping(ring))
+        battery = asyncio.create_task(self._monitor_battery(ring))
+        tasks = (owner, monitor, battery)
         try:
-            done, _ = await asyncio.wait((owner, monitor), return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
         finally:
@@ -364,15 +373,37 @@ class RingWorker:
             self._ring = None
             self._audio_armed = False
             self._audio_directory = None
-            for task in (owner, monitor):
+            for task in tasks:
                 self._cancel_task(task)
-            await asyncio.gather(owner, monitor, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             self._audio_pending = None
             self._audio_task = None
             self._audio_busy = False
             self._wake = None
             self._audio("idle", "Audio reception is off.")
             self._stream("suspended", "BLE session ended.")
+
+    async def _monitor_battery(self, ring):
+        """Low-rate telemetry; never block IMU consumption or restart reports.
+
+        GET_INFO shares the client's request/write locks. Skip ongoing audio
+        operations; cancellation belongs to the BLE session, not the Tk thread.
+        Optional telemetry failures must not tear down an otherwise usable link.
+        """
+        while True:
+            # Initial battery info was already included in the connected event.
+            await asyncio.sleep(BATTERY_REFRESH_INTERVAL)
+            self._check_interrupted()
+            if not ring.is_connected or self._audio_busy:
+                continue
+            try:
+                info = await sdk.get_system_info(ring, timeout_s=BATTERY_TIMEOUT)
+            except sdk.OpenZiloError as exc:
+                self._emit("battery", _battery_status(None))
+                self._emit("warning", f"电量读取失败，将于下次刷新重试：{exc}")
+            else:
+                if ring.is_connected:
+                    self._emit("battery", _battery_status(info))
 
     async def _housekeeping(self, ring):
         while True:

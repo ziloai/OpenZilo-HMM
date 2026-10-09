@@ -92,12 +92,12 @@ class GuiControllerTests(unittest.TestCase):
         app.tree = Mock()
         app.tree.get_children.return_value = []
         app.tree.insert.side_effect = (str(i) for i in itertools.count())
-        for name in ("name_entry", "record_button", "export_button", "device_choice",
+        for name in ("name_entry", "record_button", "export_button", "device_choice", "battery_label",
                      "audio_start_button", "audio_stop_button", "audio_dir_button",
                      "audio_list_button", "audio_download_button", "remote_audio_choice"):
             setattr(app, name, Mock())
         for name in ("status", "raw", "take_text", "result", "model_text", "dir_text", "address",
-                     "stream_text", "audio_text", "audio_dir_text", "evaluation_text", "mode_text"):
+                     "stream_text", "audio_text", "audio_dir_text", "evaluation_text", "mode_text", "battery_text"):
             setattr(app, name, Var(""))
         app.name = Var("测试手势")
         app.live = Var(False)
@@ -161,6 +161,59 @@ class GuiControllerTests(unittest.TestCase):
         self.app.handle("stream_state", dict(state="active", sample_rate_hz=50, accel_range_g=8, gyro_range_dps=2000))
         self.assertEqual(self.app.actual_rate, 50)
         self.app.worker.disconnect.assert_not_called()
+
+    def test_battery_display_initial_update_charging_low_and_unknown_values(self):
+        self.app.connecting = True
+        self.app.handle("connected", {"address": "ring", "battery_percent": 90, "battery_charging": False})
+        self.assertEqual(self.app.battery_text.get(), "电量：90%")
+        self.app.handle("battery", {"battery_percent": 42, "battery_charging": True})
+        self.assertEqual(self.app.battery_text.get(), "电量：42% · 充电中")
+        self.app.battery_label.configure.assert_called_with(foreground="#187b3c")
+        for percent in (20, 1, 0):
+            with self.subTest(percent=percent):
+                self.app.handle("battery", {"battery_percent": percent, "battery_charging": False})
+                self.assertEqual(self.app.battery_text.get(), f"电量：{percent}% · 低电量")
+                self.app.battery_label.configure.assert_called_with(foreground="#c0392b")
+        self.app.handle("battery", {"battery_percent": 100, "battery_charging": False})
+        self.assertEqual(self.app.battery_text.get(), "电量：100%")
+        for percent in (None, -1, 101, True, "80", 80.0, float("nan")):
+            with self.subTest(percent=percent):
+                self.app.handle("battery", {"battery_percent": percent})
+                self.assertEqual(self.app.battery_text.get(), "电量：未知")
+        self.app.handle("battery", {})
+        self.assertEqual(self.app.battery_text.get(), "电量：未知")
+        self.app.battery_label.configure.assert_called_with(foreground="#777777")
+
+    def test_battery_clears_on_disconnect_reconnect_and_ignores_late_updates(self):
+        self.app.set_battery_status({"battery_percent": 80})
+        self.app.disconnect()
+        self.assertEqual(self.app.battery_text.get(), "电量：—")
+        self.app.handle("battery", {"battery_percent": 75})
+        self.assertEqual(self.app.battery_text.get(), "电量：—")
+        self.app.handle("reconnecting", {"message": "自动重连…", "attempt": 1})
+        self.app.handle("battery", {"battery_percent": 75})
+        self.assertEqual(self.app.battery_text.get(), "电量：—")
+        self.app.handle("connected", {"address": "ring", "battery_percent": 70})
+        self.assertEqual(self.app.battery_text.get(), "电量：70%")
+        # A mode pause is not BLE loss, and should not erase known battery info.
+        self.app.handle("stream_state", {"state": "suspended", "message": "录音模式"})
+        self.assertEqual(self.app.battery_text.get(), "电量：70%")
+        self.app.handle("disconnected", None)
+        self.assertEqual(self.app.battery_text.get(), "电量：—")
+        self.app.connected = True
+        self.app.closing = True
+        self.app.handle("battery", {"battery_percent": 65})
+        self.assertEqual(self.app.battery_text.get(), "电量：—")
+
+    def test_starting_new_connection_clears_old_battery_and_missing_info_is_unknown(self):
+        self.app.set_battery_status({"battery_percent": 80})
+        self.app.connected = False
+        self.app.address.set("another-ring")
+        self.app.connect()
+        self.assertEqual(self.app.battery_text.get(), "电量：—")
+        self.app.handle("connected", {"address": "another-ring"})
+        self.assertEqual(self.app.battery_text.get(), "电量：未知")
+        self.app.error.assert_not_called()
 
     def test_save_failure_preserves_pending_recordings(self):
         self.record()
