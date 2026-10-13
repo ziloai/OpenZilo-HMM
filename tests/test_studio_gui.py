@@ -77,6 +77,7 @@ class GuiControllerTests(unittest.TestCase):
         app.audio_directory = app.directory / "audio"
         app.audio_files, app.remote_audio_files = {}, {}
         app.plot = Mock()
+        app.acceleration_view = Mock()
         app.plot.next_sample = 0
         def append_samples(samples):
             app.plot.next_sample += len(samples)
@@ -419,6 +420,28 @@ class GuiControllerTests(unittest.TestCase):
         self.app.plot.set_sample_rate.assert_called_with(25)
         self.app.plot.append_samples.assert_called_with([[4] * 6] * 5)
         self.assertIn("4 / 4 / 4", self.app.raw.get())
+
+    def test_acceleration_diagnostics_receive_metadata_all_samples_and_resets(self):
+        payload = dict(state="active", sample_rate_hz=100, accel_range_g=16, gyro_range_dps=2000)
+        self.app.handle("stream_state", payload)
+        self.app.acceleration_view.set_stream_state.assert_called_with(payload)
+        rows = [[0, 0, 2048, 0, 0, 0], [3000, 4000, 0, 0, 0, 0]]
+        self.app.samples(rows)
+        self.app.acceleration_view.append_samples.assert_called_once_with(rows)
+        self.assertIsNone(self.app.take)  # Diagnostics do not start a recording.
+        self.assertEqual(self.app.pending, [])
+        self.app.handle("stream_state", {"state": "waiting", "message": "断流"})
+        self.app.acceleration_view.set_stream_state.assert_called_with({"state": "waiting", "message": "断流"})
+        self.app.acceleration_view.append_samples.reset_mock()
+        self.app.samples(rows)
+        self.app.acceleration_view.append_samples.assert_not_called()
+        self.app.handle("disconnected", None)
+        self.assertNotEqual(self.app.acceleration_view.set_stream_state.call_args.args[0]["state"], "active")
+
+    def test_poll_redraws_acceleration_on_gui_thread(self):
+        self.app.poll()
+        self.app.acceleration_view.redraw.assert_called_once()
+        self.app.root.after.assert_called_with(50, self.app.poll)
 
     def test_gesture_recording_requires_active_imu(self):
         self.app.imu_active = False

@@ -58,6 +58,8 @@ Tkinter comes from your Python/OS installation, not a Python package dependency.
 
 The live chart tab shows acceleration and gyroscope traces. Recognized segments are outlined in purple, aligned to sample indices and labelled with the gesture name. Freeze/clear controls affect the traces and boxes, not capture. There is one IMU consumer, with idle batches discarded between takes. Mode-related pauses retain BLE and retry IMU reporting when gesture mode returns; real link loss triggers reconnect with backoff. Gaps cancel unfinished takes but preserve completed ones. Manual disconnect stops retries, and shutdown cleans up reports and the link. Studio does not change device modes or hardware sample rates.
 
+The “加速度诊断” (acceleration diagnostics) tab shows resultant acceleration in raw units, g and m/s², sensor-frame unit direction and axis angles, direction projections, and magnitude history with reference bands around 1g. Readings **include gravity**; they are not movement direction or firmware calibration results. See the [calculation and validation limits](studio/README.md#加速度方向与合加速度诊断).
+
 BLE requires an adapter and permissions (BlueZ on Linux, terminal/IDE Bluetooth permission on macOS). Gesture features do not need `ffmpeg`; decoding ring recordings into WAV requires a system `ffmpeg` installation, with raw `.bin` preserved if decoding is unavailable. Integration targets SDK **0.5.0**, protocol **v4**, and upstream firmware documentation baseline **`V2.000.0001.0015`**; verify your hardware/firmware. The exact SDK commit is pinned in [`studio/pyproject.toml`](studio/pyproject.toml).
 
 ## Ring recordings

@@ -88,7 +88,7 @@ class Studio:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(50, self.poll)
         self.log("每次只录制一个完整动作；拒识标定每类至少 3 次，留出评估至少 4 次，建议采集更多变化。")
-        self.log("原始六轴顺序：ax, ay, az, gx, gy, gz（设备原始整数，不转换单位）。")
+        self.log("原始六轴顺序：ax, ay, az, gx, gy, gz；录制/识别保留原始单位，合加速度与方向请看“加速度诊断”页。")
         self.log("响指/敲击请先应用短促动作预设；单类不显示虚构置信度，正样本标定仍不能保证消除误触。")
         self.log("训练、录制和识别必须使用相同采样率。")
         self.log("实时曲线页可暂停显示；录音页先开启接收，再在戒指上长按录音、松开推送。")
@@ -131,6 +131,11 @@ class Studio:
         audio = ttk.Frame(self.tabs, padding=6)
         self.tabs.add(self.gesture_tab, text="手势录制与训练")
         self.tabs.add(chart, text="实时六轴曲线")
+        acceleration = ttk.Frame(self.tabs, padding=6)
+        self.tabs.add(acceleration, text="加速度诊断")
+        from .acceleration_view import AccelerationView
+        self.acceleration_view = AccelerationView(acceleration)
+        self.acceleration_view.widget.pack(fill="both", expand=True)
         self.preview_tab = ttk.Frame(self.tabs, padding=6)
         self.tabs.add(self.preview_tab, text="录制波形（滤波后）")
         self.tabs.add(audio, text="戒指录音")
@@ -1000,6 +1005,7 @@ class Studio:
         if not self.connected or not self.imu_active or not payload:
             return
         self.plot.append_samples(payload)
+        self.acceleration_view.append_samples(payload)
         self.count += len(payload)
         self.raw.set(f"ax / ay / az / gx / gy / gz：{' / '.join(map(str, payload[-1]))}；样本数：{self.count}")
         if self.take is not None:
@@ -1039,6 +1045,7 @@ class Studio:
             return
         self.drain_events()
         self.plot.redraw()
+        self.acceleration_view.redraw()
         self.preview_plot.redraw()
         self.root.after(50, self.poll)
 
@@ -1068,6 +1075,7 @@ class Studio:
                 self.stop_live()
             self.raw.set("ax / ay / az / gx / gy / gz：—（无新数据，未断言 BLE 断开）")
         self.imu_active = active
+        self.acceleration_view.set_stream_state(payload)
         self.stream_text.set(message)
         self.plot.set_status(message)
         if active and self.live.get() and self.recognizer is None and self.audio_state in {"idle", "listening"}:
