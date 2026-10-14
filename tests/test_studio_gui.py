@@ -115,6 +115,22 @@ class GuiControllerTests(unittest.TestCase):
         self.app.samples([[value] * 6] * count)
         self.app.toggle_record()
 
+    def select_saved_datasets(self, *names):
+        paths = [save_dataset(GestureDataset(name, [np.ones((20, 6))] * 2,
+                                            training_regions=[(2, 18), None]), self.app.directory)
+                 for name in names]
+        self.app.refresh()
+        self.app.tree.selection.return_value = tuple(self.app.records)
+        return paths
+
+    def set_current_trained_model(self):
+        self.app.bundle, self.app.origin = Mock(), "trained"
+        self.app.live.set(True)
+        self.app.recognizer = Mock()
+        self.app.evaluation_revision = self.app.revision
+        self.app.evaluation_text.set("已有评估结果")
+        return self.app.recognizer
+
     def test_recording_short_retry_and_append_save(self):
         self.record(count=5)
         self.assertEqual(self.app.pending, [])
@@ -230,6 +246,338 @@ class GuiControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "采样率"):
             self.app.persist(GestureDataset("a/b", [np.ones((16, 6))] * 2, 50))
         self.assertEqual(load_dataset(dataset_path("a/b", self.app.directory)).sample_rate_hz, 25)
+
+    def test_delete_requires_valid_selection_and_idle_state(self):
+        path, = self.select_saved_datasets("保留")
+        item, = self.app.records
+        records = dict(self.app.records)
+        revision = self.app.revision
+        self.set_current_trained_model()
+        for selected, training, closing, error in (
+                ((), False, False, True),
+                (("missing-row",), False, False, True),
+                ((item, "missing-row"), False, False, True),
+                ((item,), True, False, False),
+                ((item,), False, True, False)):
+            with self.subTest(selected=selected, training=training, closing=closing):
+                self.app.tree.selection.return_value = selected
+                self.app.training, self.app.closing = training, closing
+                self.app.error.reset_mock()
+                self.app.delete_datasets()
+                gui.messagebox.askyesno.assert_not_called()
+                self.assertEqual(self.app.error.call_count, int(error))
+                self.assertTrue(path.exists())
+                self.assertEqual(self.app.records, records)
+                self.assertEqual(self.app.revision, revision)
+                self.assertFalse(self.app.stale)
+                self.assertTrue(self.app.live.get())
+
+    def test_delete_cancel_preserves_files_preview_selection_and_model(self):
+        paths = self.select_saved_datasets("一个", "另一个")
+        self.app.preview_dataset()
+        preview = self.app.preview_repetitions
+        selection = self.app.tree.selection.return_value
+        records = dict(self.app.records)
+        contents = [path.read_bytes() for path in paths]
+        revision = self.app.revision
+        recognizer = self.set_current_trained_model()
+        self.app.tree.delete.reset_mock()
+        for answer in (False, None):
+            with self.subTest(answer=answer):
+                gui.messagebox.askyesno.return_value = answer
+                self.app.delete_datasets()
+                self.assertEqual([path.read_bytes() for path in paths], contents)
+                self.assertEqual(self.app.records, records)
+                self.assertEqual(self.app.tree.selection.return_value, selection)
+                self.assertIs(self.app.preview_repetitions, preview)
+                self.assertEqual(self.app.revision, revision)
+                self.assertEqual(self.app.evaluation_revision, revision)
+                self.assertFalse(self.app.stale)
+                self.assertTrue(self.app.live.get())
+        recognizer.reset.assert_not_called()
+        self.app.tree.delete.assert_not_called()
+        self.app.error.assert_not_called()
+        dialog = gui.messagebox.askyesno.call_args
+        self.assertIs(dialog.kwargs["parent"], self.app.root)
+        self.assertEqual(dialog.kwargs["default"], "no")
+        self.assertIn("2 个手势", dialog.args[1])
+        self.assertIn("2 次录制", dialog.args[1])
+        self.assertIn("无法撤销", dialog.args[1])
+        for path in paths:
+            self.assertIn(str(path), dialog.args[1])
+
+    def test_delete_multiple_preserves_unsaved_active_and_unrelated_files(self):
+        first, second, keep = self.select_saved_datasets("a", "b", "keep")
+        self.app.tree.selection.return_value = tuple(
+            item for item, (path, _) in self.app.records.items() if path != keep)
+        original = keep.read_bytes()
+        exported = self.app.directory / "exports" / "model.gesture.json"
+        exported.parent.mkdir()
+        exported.write_text("exported model", encoding="utf-8")
+        source_csv = self.app.directory / "source.csv"
+        source_csv.write_text("raw recording", encoding="utf-8")
+        pending = self.app.pending = [np.ones((20, 6))]
+        regions = self.app.pending_regions = [(2, 18)]
+        self.app.pending_rate = 25
+        take = self.app.take = [[7] * 6]
+        self.app.take_rate = 25
+        self.app.preview_recordings(pending, 25, "未保存", pending=True, training_regions=regions)
+        preview = self.app.preview_repetitions
+        recognizer = self.set_current_trained_model()
+        revision = self.app.revision
+        self.app.delete_datasets()
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertEqual(keep.read_bytes(), original)
+        self.assertEqual(exported.read_text(encoding="utf-8"), "exported model")
+        self.assertEqual(source_csv.read_text(encoding="utf-8"), "raw recording")
+        self.assertEqual([path for path, _ in self.app.records.values()], [keep])
+        self.assertIs(self.app.pending, pending)
+        self.assertIs(self.app.pending_regions, regions)
+        self.assertIs(self.app.take, take)
+        self.assertEqual((self.app.pending_rate, self.app.take_rate), (25, 25))
+        self.assertIs(self.app.preview_repetitions, preview)
+        self.assertTrue(self.app.preview_is_pending)
+        self.assertEqual(self.app.preview_training_regions, regions)
+        self.assertEqual(self.app.revision, revision + 1)
+        self.assertIsNone(self.app.evaluation_revision)
+        self.assertTrue(self.app.stale)
+        self.assertFalse(self.app.live.get())
+        recognizer.reset.assert_called_once()
+        self.app.export_button.configure.assert_called_with(state="disabled")
+        self.app.error.assert_not_called()
+        self.assertIn("成功删除 2 个", self.app.log.call_args.args[0])
+        self.assertNotIn(str(keep), gui.messagebox.askyesno.call_args.args[1])
+
+    def test_delete_exact_path_not_same_name_file_and_clears_saved_preview(self):
+        canonical, = self.select_saved_datasets("a/b")
+        renamed = canonical.rename(self.app.directory / "imported-custom-name.json")
+        save_dataset(load_dataset(renamed), self.app.directory)
+        original = canonical.read_bytes()
+        self.app.refresh()
+        item = next(item for item, (path, _) in self.app.records.items() if path == renamed)
+        self.app.tree.selection.return_value = (item,)
+        self.app.preview_dataset()
+        self.app.delete_datasets()
+        self.assertFalse(renamed.exists())
+        self.assertEqual(canonical.read_bytes(), original)
+        self.assertEqual([path for path, _ in self.app.records.values()], [canonical])
+        self.assertEqual(self.app.preview_repetitions, [])
+        self.assertIsNone(self.app.preview_path)
+        self.assertFalse(self.app.preview_editable)
+        self.app.preview_plot.clear.assert_called()
+        self.app.set_preview_training_region((2, 18))
+        self.assertFalse(renamed.exists())
+        self.app.error.assert_not_called()
+
+    def test_delete_all_failures_preserve_data_and_model_state(self):
+        paths = self.select_saved_datasets("a", "b")
+        original = [path.read_bytes() for path in paths]
+        self.app.preview_dataset()
+        preview = self.app.preview_repetitions
+        preview_path = self.app.preview_path
+        records = dict(self.app.records)
+        revision = self.app.revision
+        recognizer = self.set_current_trained_model()
+        self.app.tree.delete.reset_mock()
+        with patch.object(Path, "unlink", side_effect=PermissionError("read only")) as unlink:
+            self.app.delete_datasets()
+        self.assertEqual(unlink.call_count, 2)
+        self.assertEqual([path.read_bytes() for path in paths], original)
+        self.assertEqual(self.app.records, records)
+        self.assertIs(self.app.preview_repetitions, preview)
+        self.assertEqual(self.app.preview_path, preview_path)
+        self.assertTrue(self.app.preview_editable)
+        self.assertEqual(self.app.revision, revision)
+        self.assertEqual(self.app.evaluation_revision, revision)
+        self.assertFalse(self.app.stale)
+        self.assertTrue(self.app.live.get())
+        recognizer.reset.assert_not_called()
+        self.app.tree.delete.assert_not_called()
+        self.app.export_button.configure.assert_not_called()
+        self.app.error.assert_called_once()
+        message = self.app.error.call_args.args[0]
+        self.assertIn("成功删除 0 个", message)
+        self.assertIn("失败 2 个", message)
+        self.assertIn("read only", message)
+        for path in paths:
+            self.assertIn(str(path), message)
+
+    def test_delete_partial_failure_continues_and_reports_actual_results(self):
+        first, second, third = self.select_saved_datasets("a", "b", "c")
+        original = first.read_bytes()
+        self.set_current_trained_model()
+        unlink = Path.unlink
+        attempted = []
+        def delete(path):
+            attempted.append(path)
+            if path == first:
+                raise PermissionError("file is locked")
+            unlink(path)
+        with patch.object(Path, "unlink", new=delete):
+            self.app.delete_datasets()
+        self.assertEqual(attempted, [first, second, third])
+        self.assertEqual(first.read_bytes(), original)
+        self.assertFalse(second.exists())
+        self.assertFalse(third.exists())
+        self.assertEqual([path for path, _ in self.app.records.values()], [first])
+        self.assertTrue(self.app.stale)
+        self.assertIsNone(self.app.evaluation_revision)
+        self.app.error.assert_called_once()
+        message = self.app.error.call_args.args[0]
+        self.assertIn("成功删除 2 个", message)
+        self.assertIn("失败 1 个", message)
+        self.assertIn(f"{first}：file is locked", message)
+
+    def test_delete_missing_file_refreshes_without_claiming_success(self):
+        path, = self.select_saved_datasets("externally deleted")
+        self.app.preview_dataset()
+        self.set_current_trained_model()
+        path.unlink()
+        self.app.delete_datasets()
+        self.assertEqual(self.app.records, {})
+        self.assertIsNone(self.app.preview_path)
+        self.assertTrue(self.app.stale)
+        self.assertFalse(self.app.live.get())
+        self.assertIsNone(self.app.evaluation_revision)
+        message = self.app.error.call_args.args[0]
+        self.assertIn("成功删除 0 个", message)
+        self.assertIn("已不存在 1 个", message)
+        self.assertIn("非本次删除", message)
+        self.assertIn(str(path), message)
+
+    def test_delete_last_gesture_leaves_empty_list_and_training_is_rejected(self):
+        path, = self.select_saved_datasets("last")
+        self.app.delete_datasets()
+        self.assertFalse(path.exists())
+        self.assertEqual(self.app.records, {})
+        self.app.error.assert_not_called()
+        self.app.train()
+        self.app.executor.submit.assert_not_called()
+        self.app.error.assert_called_once()
+        self.assertIn("当前目录没有有效数据", self.app.error.call_args.args[0])
+
+    def test_delete_preserves_independent_imported_model_and_live_recognizer(self):
+        self.select_saved_datasets("delete")
+        self.app.bundle, self.app.origin = Mock(), "imported"
+        bundle = self.app.bundle
+        recognizer = self.app.recognizer = Mock()
+        self.app.live.set(True)
+        self.app.evaluation_revision = self.app.revision
+        self.app.delete_datasets()
+        self.assertIs(self.app.bundle, bundle)
+        self.assertEqual(self.app.origin, "imported")
+        self.assertIs(self.app.recognizer, recognizer)
+        recognizer.reset.assert_not_called()
+        self.assertFalse(self.app.stale)
+        self.assertTrue(self.app.live.get())
+        self.app.export_button.configure.assert_not_called()
+        self.assertIsNone(self.app.evaluation_revision)
+        self.app.error.assert_not_called()
+
+    def test_delete_rechecks_busy_and_target_state_after_confirmation(self):
+        first, other = self.select_saved_datasets("a", "b")
+        item = next(item for item, (path, _) in self.app.records.items() if path == first)
+        self.app.tree.selection.return_value = (item,)
+        records = dict(self.app.records)
+        directory, revision = self.app.directory, self.app.revision
+        def change_state(change):
+            if change in ("training", "closing"):
+                setattr(self.app, change, True)
+            elif change == "directory":
+                self.app.directory = directory / "other"
+            elif change == "missing row":
+                self.app.records.pop(item)
+            else:
+                self.app.records[item] = (other, records[item][1])
+            return True
+        for change in ("training", "closing", "directory", "missing row", "path"):
+            with self.subTest(change=change):
+                self.app.training, self.app.closing = False, False
+                self.app.directory = directory
+                self.app.records = dict(records)
+                self.app.error.reset_mock()
+                gui.messagebox.askyesno.side_effect = lambda *_args, **_kwargs: change_state(change)
+                self.app.delete_datasets()
+                self.assertTrue(first.exists())
+                self.assertTrue(other.exists())
+                self.assertEqual(self.app.revision, revision)
+                self.assertEqual(self.app.error.call_count, int(change not in ("training", "closing")))
+
+    def test_delete_uses_confirmed_targets_not_new_selection(self):
+        first, other = self.select_saved_datasets("a", "b")
+        items = list(self.app.records)
+        self.app.tree.selection.return_value = (items[0],)
+        def change_selection(*_args, **_kwargs):
+            self.app.tree.selection.return_value = (items[1],)
+            return True
+        gui.messagebox.askyesno.side_effect = change_selection
+        self.app.delete_datasets()
+        self.assertFalse(first.exists())
+        self.assertTrue(other.exists())
+        self.app.error.assert_not_called()
+
+    def test_delete_keeps_invalid_files_and_existing_training_restrictions(self):
+        remove, keep = self.select_saved_datasets("a", "b")
+        self.app.tree.selection.return_value = (next(iter(self.app.records)),)
+        invalid = self.app.directory / "broken.json"
+        invalid.write_text("{broken", encoding="utf-8")
+        self.app.delete_datasets()
+        self.assertFalse(remove.exists())
+        self.assertTrue(keep.exists())
+        self.assertEqual(invalid.read_text(encoding="utf-8"), "{broken")
+        self.assertEqual(self.app.invalid_files, ["broken.json"])
+        self.app.error.assert_not_called()
+        self.app.train()
+        self.app.executor.submit.assert_not_called()
+        self.assertIn("broken.json", self.app.error.call_args.args[0])
+
+    def test_delete_refresh_failure_keeps_remaining_rows_and_reports_sync_failure(self):
+        remove, keep = self.select_saved_datasets("a", "b")
+        removed_item, kept_item = self.app.records
+        self.app.tree.selection.return_value = (removed_item,)
+        self.app.preview_dataset()
+        self.set_current_trained_model()
+        self.app.tree.delete.reset_mock()
+        with patch.object(Path, "iterdir", side_effect=PermissionError("scan denied")):
+            self.app.delete_datasets()
+        self.assertFalse(remove.exists())
+        self.assertTrue(keep.exists())
+        self.assertEqual(list(self.app.records), [kept_item])
+        self.app.tree.delete.assert_called_once_with(removed_item)
+        self.assertIsNone(self.app.preview_path)
+        self.assertTrue(self.app.stale)
+        self.assertIsNone(self.app.evaluation_revision)
+        messages = "\n".join(call.args[0] for call in self.app.error.call_args_list)
+        self.assertIn("scan denied", messages)
+        self.assertIn("成功删除 1 个", messages)
+        self.assertIn("列表刷新失败", messages)
+        self.assertTrue(self.app.refresh())
+        self.assertEqual([path for path, _ in self.app.records.values()], [keep])
+
+    def test_refresh_missing_data_directory_is_empty_without_creating_it(self):
+        self.app.directory = self.app.directory / "not-created-yet"
+        self.assertTrue(self.app.refresh())
+        self.assertEqual(self.app.records, {})
+        self.assertFalse(self.app.directory.exists())
+        self.app.error.assert_not_called()
+
+    def test_failed_directory_refresh_does_not_keep_previous_directory_rows(self):
+        path, = self.select_saved_datasets("old directory")
+        self.app.directory = self.app.directory / "other"
+        with patch.object(Path, "iterdir", side_effect=PermissionError("scan denied")):
+            self.assertFalse(self.app.refresh())
+        self.assertEqual(self.app.records, {})
+        self.assertTrue(path.exists())
+        self.app.error.assert_called_once_with("scan denied")
+
+    def test_training_scan_failure_never_trains_cached_rows(self):
+        self.select_saved_datasets("cached")
+        with patch.object(Path, "iterdir", side_effect=PermissionError("scan denied")):
+            self.app.train()
+        self.app.executor.submit.assert_not_called()
+        self.assertEqual(self.app.records, {})
+        self.assertFalse(self.app.training)
 
     def test_background_training_export_and_stale_state(self):
         rng = np.random.default_rng(4)

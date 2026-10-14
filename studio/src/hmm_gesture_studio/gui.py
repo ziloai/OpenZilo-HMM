@@ -205,7 +205,7 @@ class Studio:
         data.grid(row=2, column=0, sticky="ew", pady=5)
         data.columnconfigure(0, weight=1)
         self.tree = ttk.Treeview(data, columns=("name", "reps", "rate", "lengths"),
-                                 show="headings", height=5)
+                                 show="headings", height=5, selectmode="extended")
         for key, title, width in [("name", "名称", 220), ("reps", "重复数", 70),
                                   ("rate", "采样率 Hz", 90), ("lengths", "各次样本数", 350)]:
             self.tree.heading(key, text=title)
@@ -220,6 +220,7 @@ class Studio:
         self.button(actions, "刷新", self.refresh, lock=True).pack(side="left")
         self.button(actions, "导入 JSON", self.import_json, lock=True).pack(side="left", padx=5)
         self.button(actions, "导入 CSV（多选）", self.import_csv, lock=True).pack(side="left")
+        self.button(actions, "删除选中手势", self.delete_datasets, lock=True).pack(side="left", padx=5)
         ttk.Label(actions, text="CSV：无表头，六列逗号分隔；每文件一次重复").pack(side="left", padx=8)
 
         model = ttk.LabelFrame(gesture, text="训练与实时试识别", padding=6)
@@ -629,26 +630,105 @@ class Studio:
         self.dir_text.set(str(self.directory))
         self.refresh()
 
-    def refresh(self):
+    def delete_datasets(self):
+        if self.training or self.closing:
+            return
+        selected = self.tree.selection()
+        if not selected:
+            self.error("请先在数据集列表中选择要删除的手势。")
+            return
+        if any(item not in self.records for item in selected):
+            self.error("所选手势已变化，请刷新数据集后重新选择。")
+            return
+        directory = self.directory
+        targets = [(item, *self.records[item]) for item in selected]
+        details = "\n".join(f"“{dataset.name}”（{len(dataset.repetitions)} 次录制）\n  {path}"
+                            for _, path, dataset in targets)
+        if not messagebox.askyesno(
+                "永久删除选中手势？", f"将永久删除选中的 {len(targets)} 个手势：\n\n{details}\n\n"
+                "所列 JSON 中的全部录制和训练框标注都会删除，无法撤销。\n"
+                "未保存录制、正在采集的数据和已导出的模型文件均保留。\n"
+                "当前训练出的模型需要重新训练；独立加载的模型包不受影响。",
+                parent=self.root, default="no", icon="warning"):
+            return
+        # A native modal dialog runs a nested event loop. Recheck state, but
+        # never expand the confirmed targets to a newly selected row or path.
+        if self.training or self.closing:
+            return
+        if self.directory != directory or any(
+                item not in self.records or self.records[item][0] != path
+                for item, path, _ in targets):
+            self.error("所选手势已变化，请刷新数据集后重新选择。")
+            return
+        deleted, missing, failures, removed = [], [], [], []
+        for item, path, _ in targets:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                missing.append(str(path))
+            except OSError as exc:
+                failures.append(f"{path}：{exc}")
+                continue
+            else:
+                deleted.append(str(path))
+            removed.append(item)
+        refreshed = True
+        if removed:
+            # Keep failed/unrelated rows even if the following directory scan
+            # fails; deleted paths must no longer be selectable or editable.
+            for item in removed:
+                self.records.pop(item)
+            self.tree.delete(*removed)
+            refreshed = self.refresh(preserve_on_failure=True)
+        result = [f"删除结果：成功删除 {len(deleted)} 个；已不存在 {len(missing)} 个；失败 {len(failures)} 个。"]
+        for label, paths in (("已删除", deleted), ("文件已不存在（非本次删除）", missing), ("删除失败", failures)):
+            if paths:
+                result.append(f"{label}：\n" + "\n".join(paths))
+        if not refreshed:
+            result.append("列表刷新失败，请手动刷新；已删除的文件不会恢复。")
+        if missing or failures or not refreshed:
+            self.error("\n".join(result))
+        else:
+            self.log("\n".join(result))
+
+    def refresh(self, *, preserve_on_failure=False):
+        """Return scan/UI success; deletion can retain remaining rows on failure."""
         self.invalidate("数据目录或数据集已刷新")
         if self.preview_path is not None:
             self.preview_recordings([], None, "请重新选择已保存手势")
-        self.records.clear()
-        self.invalid_files = []
-        self.tree.delete(*self.tree.get_children())
         try:
-            paths = sorted(self.directory.glob("*.json"))
+            # Stage the scan so a directory-level failure does not erase the
+            # remaining rows after a partially successful deletion.
+            records, invalid_files = [], []
+            try:
+                # glob can silently hide directory permission errors. Keep a
+                # not-yet-created data directory empty, but report other errors.
+                paths = sorted(path for path in self.directory.iterdir() if path.match("*.json"))
+            except FileNotFoundError:
+                paths = []
             for path in paths:
                 try:
-                    dataset = load_dataset(path)
-                    item = self.tree.insert("", "end", values=(dataset.name, len(dataset.repetitions),
-                        dataset.sample_rate_hz, str([len(rep) for rep in dataset.repetitions])))
-                    self.records[item] = (path, dataset)
+                    records.append((path, load_dataset(path)))
                 except Exception as exc:
-                    self.invalid_files.append(path.name)
+                    invalid_files.append(path.name)
                     self.log(f"无效数据 {path.name}：{exc}；修正或移出目录后才能训练。")
+            self.tree.delete(*self.tree.get_children())
+            self.records.clear()
+            self.invalid_files = invalid_files
+            for path, dataset in records:
+                item = self.tree.insert("", "end", values=(dataset.name, len(dataset.repetitions),
+                    dataset.sample_rate_hz, str([len(rep) for rep in dataset.repetitions])))
+                self.records[item] = (path, dataset)
+            return True
         except Exception as exc:
+            if not preserve_on_failure:
+                # Normal refreshes (especially training/directory changes) must
+                # never fall back to cached data after a failed directory read.
+                self.records.clear()
+                self.invalid_files = []
+                self.tree.delete(*self.tree.get_children())
             self.error(str(exc))
+            return False
 
     def refresh_device_choices(self):
         scanned = {d["address"].casefold(): d for d in self.scanned_devices}
