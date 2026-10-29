@@ -66,7 +66,7 @@ BLE requires an adapter and permissions (BlueZ on Linux, terminal/IDE Bluetooth 
 
 The recording tab supports **remote start/stop**, mono/stereo, bitrate, digital gain and duration settings. Remote recordings are saved on the ring and downloaded after confirmed completion. Automatic reception handles saved-file notifications from physical-button recordings; history downloads remain available. File decoding preserves raw `.bin` on failure.
 
-**Live PCM reception** subscribes before starting recording, keeps a ring-side copy and saves WAV only after a complete validated stream. It does not play through speakers. Audio operations pause IMU, while idle saved-notification listening does not. Interrupted files can be recovered from ring history.
+**Live PCM reception** subscribes before starting recording, keeps a ring-side copy and saves WAV only after a complete validated stream. Before starting, optionally enable **边接收边播放（仅实时 PCM）** to monitor through the computer's default audio output (off by default; locked during reception). Use headphones to avoid feedback. Playback failures only warn and do not prevent recording reception or saving. Audio operations pause IMU, while idle saved-notification listening does not. Interrupted files can be recovered from ring history.
 
 The **校准与固件** tab adds guided local accelerometer/gyroscope calibration, separate calibrated diagnostics, and signed firmware OTA. Calibration never changes gesture model inputs. OTA requires an independently trusted public key, offline inspection and confirmation; other device actions and ordinary exit are blocked until completion or timeout. Transfer completion alone is not installation success. See the [Studio guide](studio/README.md) and [SDK integration contract](docs/sdk.md).
 

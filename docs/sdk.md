@@ -17,7 +17,7 @@ uv run --locked --all-packages python -m unittest discover -s tests -v
 
 Python 3.10+, Git, a Tk-enabled Python and BLE permissions are required for Studio. File decoding uses system ffmpeg; live PCM uses PyAV and does not need the ffmpeg executable. Failed file decoding preserves the original `.bin`. Speex uses the application's five-second decoder bound; Opus uses the SDK's 30-second bound. Both mono and stereo OP2C recordings preserve their channel count.
 
-文件转 WAV 需要系统 ffmpeg，失败保留原始文件；实时 PCM 不需要系统 ffmpeg。旧录音文件格式由新版 SDK 解码，不代表支持旧版 SDK。
+文件转 WAV 需要系统 ffmpeg，失败保留原始文件；实时 PCM 不需要系统 ffmpeg。本机实时播放使用 Studio 的 sounddevice/PortAudio（Linux 可能需安装 `libportaudio2`），声卡初始化和清理独立于 BLE/Tk；结束、取消及断连等待播放线程释放。旧录音文件格式由新版 SDK 解码，不代表支持旧版 SDK。
 
 ## Upstream contracts / 上游契约
 
@@ -63,7 +63,7 @@ The IMU owner pauses before audio operations and maintenance, then restarts with
 ## New device tools / 新设备工具
 
 - **Remote recording:** read settings/status; start FLASH recording with channel count, bitrate, Q8 digital gains and maximum duration. Stop requests are followed by terminal-status confirmation before download. A lost START acknowledgement is resolved by status, never a blind second START.
-- **Live PCM:** subscribe before starting LIVE_AND_FLASH recording. Keep a device copy, use STOP on disconnect, accept only validated complete END before saving a WAV. No speaker monitoring or speech recognition. Partial data is not presented as a successful recording.
+- **Live PCM:** subscribe before starting LIVE_AND_FLASH recording. Keep a device copy, use STOP on disconnect, accept only validated complete END before saving a WAV. Optional local monitoring through the default output is off by default and selected before capture; it cannot be toggled during reception. Validated PCM is forwarded to a bounded sounddevice/PortAudio playback queue, not another SDK subscriber. Playback failure or backlog warns and disables monitoring without affecting capture/save checks. No speech recognition. Partial data is not presented as a successful recording.
 - **Local calibration:** accel/quick/full step-by-step collection, independent validation, then atomic profile replacement. Cancellation/validation failure preserves the previous profile. Profiles bind device identity, model, exact firmware and ranges. Mismatches require explicit reset; no silent migration. Calibrated diagnostic values are g and deg/s, separate from raw gesture training/recognition.
 - **OTA:** select a signed APP ZIP and an independently obtained trusted P-256 PEM public key. Inspect offline, display signed metadata, confirm again, then use the immutable inspected bytes. Test bundles are rejected. While upgrading, other device actions and ordinary exit/disconnect are blocked. Transfer 100% is not success: the SDK must reconnect and verify the running version. Failed/unconfirmed updates are never automatically retried.
 
@@ -71,6 +71,6 @@ The IMU owner pauses before audio operations and maintenance, then restarts with
 
 ## Verification and upgrades / 验证与后续升级
 
-Automated tests use SDK types and simulated transports. They do not prove BLE behavior, microphone quality, calibration accuracy or installation on a physical ring. Before release, manually check capability discovery, fresh IMU/reconnection, remote stop, live END and disconnect handling, mono/stereo file decoding, calibration cancellation/validation, invalid signatures and OTA reboot/version verification on the intended hardware. Never flash as part of unattended software tests.
+Automated tests use SDK types and simulated transports. They do not prove BLE behavior, microphone/output quality or playback latency, calibration accuracy or installation on a physical ring. Before release, manually check capability discovery, fresh IMU/reconnection, remote stop, live END and disconnect handling, mono/stereo file decoding, calibration cancellation/validation, invalid signatures and OTA reboot/version verification on the intended hardware. Never flash as part of unattended software tests.
 
 升级时更新 `studio/pyproject.toml` 的完整提交、`uv.lock` 和文档；运行 `uv lock`、`uv sync --locked --all-packages`、全量测试及 `uv build --all-packages --wheel`。不要将发布依赖改为浮动分支。资产来源独立记录在 [NOTICE.md](../NOTICE.md)，SDK 升级不改变现有展示图的来源提交。
