@@ -22,6 +22,7 @@ class DeviceToolsTests(unittest.IsolatedAsyncioTestCase):
         self.worker._telemetry_lock = asyncio.Lock()
         self.worker._address = 'test-device'
         self.ring = SimpleNamespace(is_connected=True, _drain_queue=Mock(),
+                                    audio_extract_index=None, audio_observer=None,
                                     _queues=defaultdict(asyncio.Queue),
                                     capabilities=SimpleNamespace(supports=lambda _: True))
         self.worker._ring = self.ring
@@ -108,6 +109,19 @@ class DeviceToolsTests(unittest.IsolatedAsyncioTestCase):
             await self.worker._run_audio(self.ring, 'live', {'channels': 2}, 'audio-dir')
         saved.assert_awaited_once_with(b'wav-data', 5, 'audio-dir', {'record_time': 123})
         self.assertIsNone(self.worker._recording_stop)
+
+    async def test_early_finish_is_remembered_while_imu_is_stopping(self):
+        self.worker._queue_audio('record', {}, 'out')
+        self.worker._finish_recording()
+        self.assertTrue(self.worker._recording_stop.is_set())
+
+    async def test_auto_download_timeout_after_saved_notification_is_reported(self):
+        self.ring._queues[int(AudioCommand.RECORD_RESULT)].put_nowait(object())
+        with patch.object(sdk, 'receive_auto_audio_file', new_callable=AsyncMock,
+                          side_effect=sdk.TimeoutError('file info timeout')):
+            await self.worker._run_audio(self.ring, 'listen', None, 'out')
+        self.assertTrue(any(event == 'error' and 'file info timeout' in payload
+                            for event, payload in self.events))
 
     async def test_extraction_observer_uses_network_byte_order(self):
         ring = _StudioClient(transport=SimpleNamespace())

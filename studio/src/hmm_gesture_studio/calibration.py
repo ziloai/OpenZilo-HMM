@@ -12,9 +12,13 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 import json
+import logging
 import time
 
 import openzilo as sdk
+
+
+_logger = logging.getLogger(__name__)
 
 
 Emit = Callable[[str, object], None]
@@ -42,9 +46,16 @@ def read_profile(device_id: str) -> str:
 
 
 def reset_profile(device_id: str) -> None:
-    """Delete only a valid profile bound to this device; missing is an error."""
-    _load_profile(device_id)
-    sdk.imu_calibration_path(device_id).unlink()
+    """Delete this device's SDK-selected local file after caller confirmation.
+
+    Deliberately do not parse or validate the file: reset is also the recovery
+    path for corrupt or incorrectly bound profiles. No path override is allowed.
+    """
+    path = sdk.imu_calibration_path(device_id)
+    try:
+        path.unlink()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"No local IMU calibration profile: {path}") from exc
 
 
 async def _prompt_while_streaming(ring: sdk.OpenZiloClient, prompt: Prompt, message: str) -> None:
@@ -237,8 +248,14 @@ async def run_calibration(
         sdk.save_imu_calibration_profile(profile, path)
         emit("calibration_profile", _summary(profile))
         return profile
-    finally:
-        await stop()
+    except BaseException:
+        # Successful stages must stop before saving. On failure, cleanup is
+        # best-effort and must not replace the original error or cancellation.
+        try:
+            await stop()
+        except (Exception, asyncio.CancelledError):
+            _logger.warning("Could not stop IMU during failed calibration cleanup", exc_info=True)
+        raise
 
 
 async def run_diagnostics(ring: sdk.OpenZiloClient, *, device_id: str, emit: Emit) -> None:

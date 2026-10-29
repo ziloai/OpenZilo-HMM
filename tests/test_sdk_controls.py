@@ -94,7 +94,7 @@ class SDKControlsTests(unittest.TestCase):
                      "connect_button", "disconnect_button"):
             setattr(app, name, Mock())
         self.ui = app.sdk_controls = SDKControls(app)
-        self.ui.capabilities = dict(recording_control=True, live_audio=True, imu=True, ota=True)
+        self.ui.capabilities = dict(recording_control=True, live_audio=True, audio_files=True, imu=True, ota=True)
         self.ui.fields = {key: Var(value) for key, value in dict(channels="2", bitrate="16000",
                          gain_left_q8="256", gain_right_q8="256", duration_s="10").items()}
         self.ui.texts = {key: Var() for key in ("recording", "calibration", "profile", "sample", "firmware", "firmware_status")}
@@ -127,6 +127,19 @@ class SDKControlsTests(unittest.TestCase):
         self.assert_state(self.app.record_button, "disabled")
         self.assert_state(self.app.retry_imu_button, "disabled")
         self.assertTrue(self.ui.available("inspect"))
+
+    def test_audio_files_capability_is_independent_of_remote_recording(self):
+        for files, remote in ((True, False), (False, True), (False, False), (True, True)):
+            with self.subTest(audio_files=files, recording_control=remote):
+                self.ui.handle("capabilities", dict(audio_files=files, recording_control=remote, live_audio=True))
+                self.assertEqual(self.ui.available("audio"), files)
+                self.assertEqual(self.ui.available("record"), remote)
+                self.assertEqual(self.ui.available("read"), remote)
+                self.assertEqual(self.ui.available("live_audio"), remote)
+                for widget in (self.app.audio_start_button, self.app.audio_list_button, self.app.audio_download_button):
+                    self.assert_state(widget, "normal" if files else "disabled")
+        self.ui.handle("capabilities", dict(recording_control=True))
+        self.assertFalse(self.ui.available("audio"))
 
     def test_live_requires_both_audio_capabilities(self):
         self.ui.capabilities["live_audio"] = False
@@ -225,6 +238,7 @@ class SDKControlsTests(unittest.TestCase):
         self.assertFalse(self.ui.available("continue"))
 
     def test_calibration_sample_stays_out_of_raw_pipeline(self):
+        self.ui.start_diagnostics()
         self.app.samples = Mock()
         self.app.plot = Mock()
         self.app.acceleration_view = Mock()
@@ -234,6 +248,42 @@ class SDKControlsTests(unittest.TestCase):
         self.app.samples.assert_not_called()
         self.app.plot.append_samples.assert_not_called()
         self.app.acceleration_view.append_samples.assert_not_called()
+
+    def test_diagnostics_reports_actual_components_without_accuracy_claim(self):
+        self.ui.start_diagnostics()
+        for applied in ([], ["accel"], ["accel", "gyro"]):
+            with self.subTest(applied=applied):
+                self.app.handle("calibration_sample", dict(accel_g=[0, 0, 1], gyro_dps=[0, 0, 0], applied_components=applied))
+                text = self.ui.texts["sample"].get()
+                self.assertIn(f"实际应用校准组件：{applied}", text)
+                if not applied:
+                    self.assertIn("未应用校准", text)
+                    self.assertIn("原始物理单位", text)
+                    self.assertIn("不能据此认定精度已验证", text)
+                else:
+                    self.assertIn("仅列出的组件", text)
+                    self.assertIn("不代表精度已验证", text)
+
+    def test_diagnostics_stop_and_disconnect_clear_and_ignore_late_samples(self):
+        sample = dict(accel_g=[0, 0, 1], gyro_dps=[0, 0, 0], applied_components=[])
+        for ending in ("stop", "idle", "disconnected", "reconnecting"):
+            with self.subTest(ending=ending):
+                self.ui.tool_state = "idle"
+                self.ui.capabilities["imu"] = True
+                self.ui.start_diagnostics()
+                self.app.handle("calibration_sample", sample)
+                self.assertIn("加速度 g", self.ui.texts["sample"].get())
+                if ending == "stop":
+                    self.ui.stop_tool()
+                    # A queued startup state must not re-enable stopped samples.
+                    self.ui.handle("tool_state", dict(state="diagnostics"))
+                elif ending == "idle":
+                    self.ui.handle("tool_state", dict(state="idle"))
+                else:
+                    self.ui.handle(ending, None)
+                self.assertIn("无实时数据", self.ui.texts["sample"].get())
+                self.app.handle("calibration_sample", sample)
+                self.assertNotIn("加速度 g", self.ui.texts["sample"].get())
 
     def test_tool_blocks_queued_raw_samples_and_gesture_start(self):
         self.ui.start_diagnostics()

@@ -811,10 +811,12 @@ class RingWorker:
             else:
                 ring.audio_observer = observe
                 self._check_interrupted()
+                saved_queue = ring._queues.get(int(AudioCommand.RECORD_RESULT))
+                saved_notification = saved_queue is not None and not saved_queue.empty()
                 try:
                     index, data = await sdk.receive_auto_audio_file(ring, timeout_s=AUDIO_TIMEOUT)
                 except sdk.TimeoutError:
-                    if receiving:
+                    if receiving or saved_notification:
                         raise
                     return  # No first frame: yield back to IMU, leaving arming intact.
                 await self._save(data, index, directory, {})

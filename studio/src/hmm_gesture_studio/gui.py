@@ -829,6 +829,7 @@ class Studio:
         if self.sdk_controls.firmware_locked:
             return
         self.sdk_controls.capabilities = {}
+        self.sdk_controls.clear_calibration_sample()
         self.sdk_controls.connection_epoch += 1
         self.set_stream_state({"state": "waiting", "message": "IMU 已停止"})
         self.cancel_take()

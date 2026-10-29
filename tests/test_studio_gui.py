@@ -111,7 +111,7 @@ class GuiControllerTests(unittest.TestCase):
         app.executor = Mock()
         app.executor.submit.side_effect = lambda run: run()
         app.sdk_controls = SDKControls(app)
-        app.sdk_controls.capabilities = dict(recording_control=True, live_audio=True, imu=True, ota=True)
+        app.sdk_controls.capabilities = dict(recording_control=True, live_audio=True, audio_files=True, imu=True, ota=True)
 
     def record(self, count=16, value=1):
         self.app.toggle_record()
@@ -809,6 +809,33 @@ class GuiControllerTests(unittest.TestCase):
         self.assertFalse(self.app.connecting)
         self.assertFalse(self.app.imu_active)
         self.app.worker.disconnect.assert_not_called()
+
+    def test_audio_file_actions_use_independent_capability(self):
+        self.app.sdk_controls.capabilities.update(recording_control=False, audio_files=True)
+        self.app.start_audio()
+        self.app.worker.start_audio.assert_called_once_with(self.app.audio_directory)
+        self.app.set_audio_state({"state": "idle"})
+        self.app.list_audio()
+        self.app.worker.list_audio.assert_called_once()
+        self.app.set_audio_state({"state": "idle"})
+        self.app.remote_audio_files = {"file 1": 1}
+        self.app.remote_audio_choice.get.return_value = "file 1"
+        self.app.download_audio()
+        self.app.worker.download_audio.assert_called_once_with(1, self.app.audio_directory)
+        self.app.set_audio_state({"state": "idle"})
+        self.app.worker.reset_mock()
+        self.app.sdk_controls.capabilities.update(recording_control=True, audio_files=False)
+        self.app.start_audio()
+        self.app.list_audio()
+        self.app.download_audio()
+        self.assertEqual(self.app.worker.mock_calls, [])
+
+    def test_disconnect_immediately_clears_diagnostics(self):
+        self.app.sdk_controls.texts["sample"] = Var("stale diagnostic values")
+        self.app.sdk_controls.tool_state = "diagnostics"
+        self.app.disconnect()
+        self.assertIn("无实时数据", self.app.sdk_controls.texts["sample"].get())
+        self.assertTrue(self.app.sdk_controls.diagnostics_stopping)
 
     def test_audio_controls_arm_receiver_not_hardware_recording(self):
         self.app.start_audio()

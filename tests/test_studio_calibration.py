@@ -235,6 +235,64 @@ class CalibrationTests(unittest.IsolatedAsyncioTestCase):
         self.stop.assert_awaited_once()
         self.assertFalse(self.path.exists())
 
+    async def test_cleanup_stop_failure_preserves_original_cancellation(self):
+        self.old_profile()
+        before = self.path.read_bytes()
+        cancelled = asyncio.CancelledError("user cancelled")
+        self.collect.side_effect = cancelled
+        self.stop.side_effect = sdk.TransportError("cleanup disconnected")
+        with self.assertLogs(calibration.__name__, level="WARNING"), self.assertRaises(asyncio.CancelledError) as caught:
+            await self.run_mode("accel")
+        self.assertIs(caught.exception, cancelled)
+        self.stop.assert_awaited_once()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(any(call.args[0] == "calibration_profile" for call in self.emit.call_args_list))
+
+    async def test_cleanup_stop_failure_preserves_original_validation_error(self):
+        self.old_profile()
+        before = self.path.read_bytes()
+        self.collect.side_effect = accel_windows()
+        invalid = ValueError("independent validation failed")
+        validate = self.patch("validate_imu_calibration", side_effect=invalid)
+        self.stop.side_effect = sdk.TimeoutError("cleanup stop timeout")
+        with self.assertLogs(calibration.__name__, level="WARNING"), self.assertRaises(ValueError) as caught:
+            await self.run_mode("accel")
+        self.assertIs(caught.exception, invalid)
+        validate.assert_called_once()
+        self.stop.assert_awaited_once()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(any(call.args[0] == "calibration_profile" for call in self.emit.call_args_list))
+
+    async def test_normal_stop_failure_never_saves_even_if_cleanup_retry_succeeds(self):
+        self.old_profile()
+        before = self.path.read_bytes()
+        failed_stop = sdk.TimeoutError("normal stop failed")
+        save = self.patch("save_imu_calibration_profile", wraps=sdk.save_imu_calibration_profile)
+        for retry in (None, sdk.TransportError("cleanup stop failed")):
+            with self.subTest(retry=retry):
+                self.collect.side_effect = accel_windows()
+                self.stop.side_effect = [failed_stop, retry]
+                with patch.object(calibration._logger, "warning") as warning:
+                    with self.assertRaises(sdk.TimeoutError) as caught:
+                        await self.run_mode("accel")
+                self.assertEqual(warning.call_count, int(retry is not None))
+                self.assertIs(caught.exception, failed_stop)
+                self.assertEqual(self.path.read_bytes(), before)
+                save.assert_not_called()
+                self.assertFalse(any(call.args[0] == "calibration_profile" for call in self.emit.call_args_list))
+
+    async def test_save_follows_successful_validation_and_stop(self):
+        self.collect.side_effect = accel_windows()
+        validate = self.patch("validate_imu_calibration", wraps=sdk.validate_imu_calibration)
+        save_original = sdk.save_imu_calibration_profile
+        def save(profile, path):
+            validate.assert_called_once()
+            self.stop.assert_awaited_once()
+            save_original(profile, path)
+        self.patch("save_imu_calibration_profile", side_effect=save)
+        await self.run_mode("accel")
+        self.assertTrue(self.path.exists())
+
     async def test_bad_profiles_rejected_before_start(self):
         original = self.old_profile()
         for changes in ({"device_key": sdk.imu_device_key("other")},
@@ -296,15 +354,30 @@ class CalibrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.path.exists())
         self.start.assert_not_called()
 
-    def test_reset_refuses_corrupt_or_wrong_device_profile(self):
+    def test_reset_removes_corrupt_or_wrong_device_profile_but_read_stays_strict(self):
         original = self.old_profile()
         sdk.save_imu_calibration_profile(replace(original, device_key=sdk.imu_device_key("other")), self.path)
-        with self.assertRaises((ValueError, sdk.CompatibilityError)):
-            calibration.reset_profile(DEVICE)
+        with self.assertRaises(sdk.CompatibilityError):
+            calibration.read_profile(DEVICE)
+        calibration.reset_profile(DEVICE)
+        self.assertFalse(self.path.exists())
         self.path.write_text("corrupt", encoding="utf-8")
         with self.assertRaises(ValueError):
-            calibration.reset_profile(DEVICE)
-        self.assertEqual(self.path.read_text(), "corrupt")
+            calibration.read_profile(DEVICE)
+        calibration.reset_profile(DEVICE)
+        self.assertFalse(self.path.exists())
+
+    def test_reset_only_deletes_sdk_generated_path_not_identifier_as_path(self):
+        unrelated = self.path.parent / "keep.json"
+        unrelated.write_text("keep", encoding="utf-8")
+        self.path.write_text("corrupt", encoding="utf-8")
+        sdk.imu_calibration_path.reset_mock()
+        calibration.reset_profile(str(unrelated))
+        sdk.imu_calibration_path.assert_called_once_with(str(unrelated))
+        self.assertFalse(self.path.exists())
+        self.assertEqual(unrelated.read_text(), "keep")
+        with self.assertRaises(TypeError):
+            calibration.reset_profile(DEVICE, path=unrelated)
 
     async def test_diagnostics_only_emit_physical_units_throttled_and_close_on_cancel(self):
         sample = sdk.CalibratedImuSample(123, (0.0, 0.0, 1.0), (0.1, 0.2, 0.3))

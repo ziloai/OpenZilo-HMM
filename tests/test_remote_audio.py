@@ -211,6 +211,7 @@ class RemoteAudioTests(unittest.IsolatedAsyncioTestCase):
                 config = self.set_config.call_args.args[1]
                 self.assertEqual(config.output, sdk.AudioOutput.LIVE_AND_FLASH)
                 self.assertEqual(config.disconnect_policy, sdk.AudioDisconnectPolicy.STOP)
+                self.assertTrue(any(e == "audio_state" and p["state"] == "live" for e, p in self.events))
                 data, index, metadata = self.save.call_args.args
                 self.assertEqual((index, metadata["record_time"]), (7, 123))
                 with wave.open(io.BytesIO(data)) as wav:
@@ -418,11 +419,13 @@ class RemoteAudioTests(unittest.IsolatedAsyncioTestCase):
             await self.run_record()
         self.start.assert_not_awaited()
 
-    async def test_missing_sdk_api_is_actionable_and_precedes_start(self):
-        with patch.object(sdk, "open_live_audio_stream", None):
-            with self.assertRaisesRegex(RuntimeError, "SDK|sdk|openzilo"):
-                await self.run_record(live=True)
-        self.start.assert_not_awaited()
+    async def test_uncached_device_capabilities_are_discovered(self):
+        capabilities = self.ring.capabilities
+        self.ring.capabilities = None
+        with patch.object(sdk, "get_device_capabilities", AsyncMock(return_value=capabilities)) as discover:
+            await self.run_record()
+        discover.assert_awaited_once_with(self.ring)
+        self.save.assert_awaited_once()
 
     async def test_recovery_query_failure_is_not_retried(self):
         self.start.side_effect = sdk.TimeoutError("start timeout")
@@ -538,12 +541,21 @@ class RemoteAudioTests(unittest.IsolatedAsyncioTestCase):
         self.save.assert_awaited_once()
         self.stop_recording.assert_not_awaited()
 
-    async def test_read_config_reports_active_live_state(self):
-        self.get_config.return_value = sdk.AudioRecordingConfig(output=sdk.AudioOutput.LIVE_AND_FLASH)
-        self.query.return_value = ACTIVE
-        await remote_audio.read_config(self.ring, self.emit)
-        self.assertTrue(any(e == "audio_state" and p["state"] == "live" for e, p in self.events))
+    async def test_read_config_reports_foreign_recording_without_claiming_active_state(self):
+        for output in (sdk.AudioOutput.FLASH, sdk.AudioOutput.LIVE, sdk.AudioOutput.LIVE_AND_FLASH):
+            with self.subTest(output=output):
+                self.events.clear()
+                config = sdk.AudioRecordingConfig(output=output)
+                self.get_config.return_value = config
+                self.query.return_value = ACTIVE
+                await remote_audio.read_config(self.ring, self.emit)
+                self.assertEqual([name for name, _ in self.events], ["recording_config", "recording_status"])
+                self.assertEqual(self.events[0][1], dict(config.__dict__))
+                self.assertIn("capturing", self.events[1][1])
+                self.assertIn("session=41", self.events[1][1])
+        self.set_config.assert_not_awaited()
         self.start.assert_not_awaited()
+        self.stop_recording.assert_not_awaited()
 
     async def test_read_config_emits_dict_and_text_without_mutating(self):
         await remote_audio.read_config(self.ring, self.emit)
@@ -551,6 +563,7 @@ class RemoteAudioTests(unittest.IsolatedAsyncioTestCase):
         statuses = [v for e, v in self.events if e == "recording_status"]
         self.assertEqual(len(statuses), 1)
         self.assertIsInstance(statuses[0], str)
+        self.assertFalse(any(name == "audio_state" for name, _ in self.events))
         self.set_config.assert_not_awaited()
         self.start.assert_not_awaited()
 

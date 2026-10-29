@@ -24,16 +24,9 @@ Emit = Callable[[str, Any], None]
 Save = Callable[[bytes, int, dict], Awaitable[Any]]
 
 
-def _require_sdk(*names: str) -> None:
-    missing = [name for name in names if not callable(getattr(sdk, name, None))]
-    if missing:
-        raise RuntimeError("openzilo SDK 0.6.2 or newer is required; missing: " + ", ".join(missing))
-
-
 async def _capabilities(ring: Any, *features: str) -> None:
     capabilities = getattr(ring, "capabilities", None)
     if capabilities is None:
-        _require_sdk("get_device_capabilities")
         capabilities = await _command(sdk.get_device_capabilities(ring))
     for feature in features:
         capabilities.require(feature)
@@ -52,15 +45,12 @@ def _report_active(emit: Emit, *, live: bool) -> None:
 
 
 async def read_config(ring: Any, emit: Emit) -> None:
-    """Read device settings/status without changing them or starting a recording."""
-    _require_sdk("get_audio_recording_config", "get_audio_recording_status")
+    """Report settings/status only; observing a session does not claim ownership."""
     await _capabilities(ring, "recording_control")
     config = await _command(sdk.get_audio_recording_config(ring))
     status = await _command(sdk.get_audio_recording_status(ring))
     emit("recording_config", asdict(config))
     _report_status(emit, status)
-    if status.state != sdk.AudioRecordingState.IDLE and not status.finished:
-        _report_active(emit, live=config.output in (sdk.AudioOutput.LIVE, sdk.AudioOutput.LIVE_AND_FLASH))
 
 
 async def _settle(task: asyncio.Future) -> bool:
@@ -278,14 +268,6 @@ async def record(ring: Any, options: dict, *, live: bool, stop: asyncio.Event,
     policy are fixed here. A START timeout is recovered once against the idle /
     terminal baseline; if ownership remains unknown, no session is stopped.
     """
-    _require_sdk("AudioRecordingConfig", "AudioOutput", "AudioDisconnectPolicy", "AudioRecordingState",
-                 "get_audio_recording_status", "set_audio_recording_config", "start_audio_recording",
-                 "stop_audio_recording", "wait_audio_recording_finished", "TimeoutError")
-    if live:
-        _require_sdk("open_live_audio_stream", "LiveAudioStart", "LivePcmFrame", "LiveAudioEnd",
-                     "PcmConfig", "build_wav_from_pcm")
-    else:
-        _require_sdk("download_audio_file", "end_audio_extract")
     if not isinstance(options, dict):
         raise TypeError("recording options must be a dict")
     if options.keys() - _OPTIONS:

@@ -49,6 +49,7 @@ class SDKControls:
         self.capabilities = {}
         self.tool_state = "idle"
         self.awaiting_continue = False
+        self.diagnostics_stopping = False
         self.remote_session = False
         self.verified = None
         self.inspection_pending = False
@@ -83,7 +84,9 @@ class SDKControls:
             return app.connected and self.tool_state == "calibrating" and self.awaiting_continue
         if action == "cancel":
             return app.connected and self.tool_state in {"calibrating", "diagnostics"}
-        if action in {"read", "record", "audio"}:
+        if action == "audio":
+            return idle and self.capabilities.get("audio_files", False)
+        if action in {"read", "record"}:
             return idle and self.capabilities.get("recording_control", False)
         if action == "live_audio":
             return (idle and self.capabilities.get("recording_control", False)
@@ -103,6 +106,10 @@ class SDKControls:
             view.delete("1.0", "end")
             view.insert("1.0", str(value))
             view.configure(state="disabled")
+
+    def clear_calibration_sample(self):
+        self.diagnostics_stopping = True
+        self._text("sample", "校准诊断：—（无实时数据）")
 
     def _button(self, parent, key, title, action):
         button = self.studio.button(parent, title, action)
@@ -288,6 +295,8 @@ class SDKControls:
         self.studio.stop_live()
         self.tool_state = state
         self.awaiting_continue = False
+        self.clear_calibration_sample()
+        self.diagnostics_stopping = False
         self.refresh()
         if not self.studio.request(operation):
             self.tool_state = "idle"
@@ -307,6 +316,7 @@ class SDKControls:
 
     def stop_tool(self):
         if self._require("cancel"):
+            self.clear_calibration_sample()
             self.awaiting_continue = False
             self.refresh()
             self.studio.request(self.studio.worker.stop_tool)
@@ -401,17 +411,18 @@ class SDKControls:
         """Called exclusively by Studio.handle / Studio.poll on the Tk thread."""
         if event == "capabilities":
             self.capabilities = {key: payload.get(key) is True for key in
-                                 ("recording_control", "live_audio", "imu", "ota")}
+                                 ("recording_control", "live_audio", "audio_files", "imu", "ota")}
             descriptions = [f"{label}：{'支持' if self.capabilities[key] else '不支持'}" for key, label in
                             (("recording_control", "录音控制"), ("live_audio", "实时 PCM"),
-                             ("imu", "IMU"), ("ota", "签名 OTA"))]
+                             ("audio_files", "音频文件"), ("imu", "IMU"), ("ota", "签名 OTA"))]
             self._text("capabilities", " · ".join(descriptions))
-            self._text("recording", " · ".join(descriptions[:2]))
+            self._text("recording", " · ".join(descriptions[:3]))
         elif event in {"connected", "disconnected", "reconnecting"}:
             self.connection_epoch += 1
             if event != "connected":
                 self.capabilities = {}
                 self.awaiting_continue = False
+                self.clear_calibration_sample()
                 self._text("capabilities", "未连接；重新连接后重新查询设备能力。")
             self.refresh()
             return False
@@ -423,6 +434,8 @@ class SDKControls:
             return False
         elif event == "tool_state":
             self.tool_state = payload["state"]
+            if self.tool_state != "diagnostics":
+                self.clear_calibration_sample()
             self.awaiting_continue = False
             self._text("firmware_status" if self.firmware_locked else "calibration", payload.get("message", self.tool_state))
         elif event == "calibration_prompt":
@@ -434,8 +447,12 @@ class SDKControls:
         elif event == "calibration_profile":
             self._text("profile", payload)
         elif event == "calibration_sample":
-            self._text("sample", f"加速度 g：{payload['accel_g']}\n陀螺仪 °/s：{payload['gyro_dps']}\n"
-                       f"已应用校准：{payload['applied_components']}")
+            if self.studio.connected and self.tool_state == "diagnostics" and not self.diagnostics_stopping:
+                applied = payload["applied_components"]
+                note = ("仅列出的组件应用校准；诊断读数不代表精度已验证。" if applied else
+                        "未应用校准：仅显示原始物理单位读数，不能据此认定精度已验证。")
+                self._text("sample", f"加速度 g：{payload['accel_g']}\n陀螺仪 °/s：{payload['gyro_dps']}\n"
+                           f"实际应用校准组件：{applied}\n{note}")
         elif event == "recording_config":
             for key in _DEFAULTS:
                 if key in self.fields:
