@@ -55,6 +55,18 @@ class UpgradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(worker._tool_pending)
         self.assertIsNone(worker._tool_kind)
 
+    async def test_button_event_does_not_restart_imu_on_mode_free_firmware(self):
+        worker = device.RingWorker(lambda *_: None)
+        worker._wake = asyncio.Event()
+        ring = SimpleNamespace(is_connected=True, _queues=defaultdict(asyncio.Queue),
+                               _drain_queue=Mock())
+        ring._queues[0x0704].put_nowait(object())
+        task = asyncio.create_task(worker._housekeeping(ring))
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertFalse(worker._retry_requested)
+
     async def test_profile_operation_requires_connected_session(self):
         events = []
         worker = device.RingWorker(lambda *item: events.append(item))

@@ -545,9 +545,6 @@ class RingWorker:
                 continue
             # The SDK queues every notification even without a subscription.
             # These fixed-version event queues have no other Studio consumer.
-            key_queue = ring._queues.get(0x0704)
-            if key_queue is not None and not key_queue.empty():
-                self._retry()  # A hint to probe, never evidence of ring mode.
             for command in (0x0701, 0x0702, 0x0703, 0x0704):
                 _drain(ring, command)
             if not self._audio_busy:
