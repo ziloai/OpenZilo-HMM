@@ -100,6 +100,8 @@ class SDKControlsTests(unittest.TestCase):
         self.ui.texts = {key: Var() for key in ("recording", "calibration", "profile", "sample", "firmware", "firmware_status")}
         self.ui.buttons = {key: Mock() for key in ("record", "read", "live_audio", "finish", "accel", "quick",
                           "full", "continue", "cancel", "profile", "reset", "diagnostics", "inspect", "install")}
+        self.ui.playback = Var(False)
+        self.ui.buttons['playback'] = Mock()
         self.ui.zip_path, self.ui.key_path = Var("/tmp/signed.zip"), Var("/tmp/trusted.pem")
         self.ui.progress = Mock()
         self.ui.verified = Verified()
@@ -176,7 +178,7 @@ class SDKControlsTests(unittest.TestCase):
                 self.ui.start_recording(live=live)
                 self.app.worker.start_remote_recording.assert_called_once_with(
                     dict(channels=2, bitrate=16000, gain_left_q8=256, gain_right_q8=256, max_duration_ms=10000),
-                    self.app.audio_directory, live=live)
+                    self.app.audio_directory, live=live, playback=False)
                 self.app.stop_live.assert_called()
                 self.assertEqual(self.app.audio_state, "starting")
                 self.assertFalse(self.ui.available("record"))
@@ -189,6 +191,36 @@ class SDKControlsTests(unittest.TestCase):
                 self.assertFalse(self.ui.available("finish"))
                 self.app.handle("audio_state", {"state": "idle"})
                 self.assertFalse(self.ui.remote_session)
+
+    def test_audio_ui_builds_playback_option_off_by_default(self):
+        ttk = Mock()
+        tk = SimpleNamespace(StringVar=Var, BooleanVar=Var, ttk=ttk)
+        self.app.button = Mock(return_value=Mock())
+        with patch.dict(sys.modules, {'tkinter': tk}):
+            self.ui.build_audio(Mock())
+        self.assertFalse(self.ui.playback.get())
+        self.assertEqual(ttk.Checkbutton.call_args.kwargs['variable'], self.ui.playback)
+        self.assertIs(self.ui.buttons['playback'], ttk.Checkbutton.return_value)
+
+    def test_checked_playback_only_applies_to_live_and_is_locked_during_capture(self):
+        self.ui.playback.set(True)
+        for live in (False, True):
+            with self.subTest(live=live):
+                self.app.audio_state = 'idle'
+                self.app.worker.reset_mock()
+                self.ui.start_recording(live=live)
+                self.assertEqual(self.app.worker.start_remote_recording.call_args.kwargs,
+                                 {'live': live, 'playback': live})
+                self.assert_state(self.ui.buttons['playback'], 'disabled')
+                self.app.handle('audio_state', {'state': 'idle'})
+                self.assert_state(self.ui.buttons['playback'], 'normal')
+        self.ui.capabilities['live_audio'] = False
+        self.ui.refresh()
+        self.assert_state(self.ui.buttons['playback'], 'disabled')
+        self.ui.capabilities['live_audio'] = True
+        self.app.closing = True
+        self.ui.refresh()
+        self.assert_state(self.ui.buttons['playback'], 'disabled')
 
     def test_invalid_options_never_call_worker(self):
         self.ui.fields["duration_s"].set("1.001")

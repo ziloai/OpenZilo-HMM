@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import Future
+from dataclasses import dataclass
 import math
 import threading
 from weakref import WeakSet
@@ -22,6 +23,12 @@ AUDIO_TIMEOUT = 2.0
 CLEANUP_TIMEOUT = 1.0
 BATTERY_REFRESH_INTERVAL = 60.0
 BATTERY_TIMEOUT = 2.0
+
+
+@dataclass(frozen=True)
+class _RecordingRequest:
+    options: dict
+    playback: bool = False
 
 
 class _StudioClient(sdk.OpenZiloClient):
@@ -290,8 +297,9 @@ class RingWorker:
     def read_recording_config(self):
         self._control(self._accept_audio, "config", None, None)
 
-    def start_remote_recording(self, options, directory, *, live=False):
-        self._control(self._accept_audio, "live" if live else "record", dict(options), directory)
+    def start_remote_recording(self, options, directory, *, live=False, playback=False):
+        request = _RecordingRequest(dict(options), playback=bool(live and playback))
+        self._control(self._accept_audio, "live" if live else "record", request, directory)
 
     def finish_remote_recording(self):
         self._control(self._finish_recording)
@@ -776,8 +784,8 @@ class RingWorker:
                         self._recording_stop = asyncio.Event()
                     try:
                         await remote_audio.record(
-                            ring, index, live=kind == "live", stop=self._recording_stop,
-                            emit=self._emit,
+                            ring, index.options, live=kind == "live", stop=self._recording_stop,
+                            emit=self._emit, playback=index.playback,
                             save=lambda data, file_index, metadata: self._save(
                                 data, file_index, directory, metadata,
                             ),

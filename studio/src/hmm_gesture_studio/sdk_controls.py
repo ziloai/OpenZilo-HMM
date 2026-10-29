@@ -51,6 +51,7 @@ class SDKControls:
         self.awaiting_continue = False
         self.diagnostics_stopping = False
         self.remote_session = False
+        self.playback = None
         self.verified = None
         self.inspection_pending = False
         self.inspection_id = 0
@@ -88,7 +89,7 @@ class SDKControls:
             return idle and self.capabilities.get("audio_files", False)
         if action in {"read", "record"}:
             return idle and self.capabilities.get("recording_control", False)
-        if action == "live_audio":
+        if action in {"live_audio", "playback"}:
             return (idle and self.capabilities.get("recording_control", False)
                     and self.capabilities.get("live_audio", False))
         if action in {"accel", "quick", "full", "profile", "reset", "diagnostics"}:
@@ -154,9 +155,17 @@ class SDKControls:
         self._button(actions, "record", "开始远程录音", self.start_recording)
         self._button(actions, "finish", "停止并保存", self.finish_recording)
         self._button(actions, "live_audio", "实时 PCM 接收并保存", lambda: self.start_recording(live=True))
+        monitor = ttk.Frame(form)
+        monitor.pack(fill="x")
+        self.playback = tk.BooleanVar(value=False)
+        self.buttons["playback"] = ttk.Checkbutton(
+            monitor, text="边接收边播放（仅实时 PCM）", variable=self.playback)
+        self.buttons["playback"].pack(side="left")
+        ttk.Label(monitor, text="开始前勾选；建议使用耳机，避免啸叫。").pack(side="left", padx=8)
         self.texts["recording"] = tk.StringVar(value="连接后按设备能力启用；增益 256 = 1 倍。")
         ttk.Label(form, textvariable=self.texts["recording"], wraplength=900).pack(anchor="w")
-        ttk.Label(form, text="远程保存到戒指后下载；实时接收同时保留设备副本，完整 END 后生成 WAV，不播放扬声器。\n"
+        ttk.Label(form, text="远程保存到戒指后下载；实时接收同时保留设备副本，完整 END 后生成 WAV。\n"
+                  "勾选后通过电脑默认音频设备播放；播放失败会在日志中提示，接收与保存继续。\n"
                   "音频期间暂停 IMU，结束后恢复；最长时间以 0.02 秒递增。", wraplength=900).pack(anchor="w", pady=4)
 
     def build_tools(self, parent):
@@ -276,7 +285,9 @@ class SDKControls:
         app.stop_live()
         self.remote_session = True
         app.set_audio_state({"state": "starting", "message": "正在启动实时接收…" if live else "正在启动远程录音…"})
-        if not app.request(lambda: app.worker.start_remote_recording(options, app.audio_directory, live=live)):
+        playback = bool(live and self.playback is not None and self.playback.get())
+        if not app.request(lambda: app.worker.start_remote_recording(
+                options, app.audio_directory, live=live, playback=playback)):
             self.remote_session = False
             app.set_audio_state({"state": "idle", "message": "启动录音失败"})
 

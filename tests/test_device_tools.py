@@ -99,16 +99,31 @@ class DeviceToolsTests(unittest.IsolatedAsyncioTestCase):
     async def test_remote_recording_stop_event_and_save_callback_are_wired(self):
         from hmm_gesture_studio import remote_audio
         saved = self.stack.enter_context(patch.object(self.worker, '_save', new_callable=AsyncMock))
-        async def record(ring, options, *, live, stop, emit, save):
+        async def record(ring, options, *, live, stop, emit, save, playback):
             self.assertTrue(live)
+            self.assertTrue(playback)
             self.assertEqual(options, {'channels': 2})
             self.worker._finish_recording()
             self.assertTrue(stop.is_set())
             await save(b'wav-data', 5, {'record_time': 123})
-        with patch.object(remote_audio, 'record', side_effect=record):
-            await self.worker._run_audio(self.ring, 'live', {'channels': 2}, 'audio-dir')
+        with patch.object(remote_audio, 'record', side_effect=record), \
+             patch.object(self.worker, '_control', side_effect=lambda fn, *args: fn(*args)):
+            options = {'channels': 2}
+            self.worker.start_remote_recording(options, 'audio-dir', live=True, playback=True)
+            options['channels'] = 1
+            await self.worker._run_audio(self.ring, *self.worker._audio_pending)
         saved.assert_awaited_once_with(b'wav-data', 5, 'audio-dir', {'record_time': 123})
         self.assertIsNone(self.worker._recording_stop)
+
+    async def test_worker_defaults_to_no_playback_and_ignores_it_for_flash(self):
+        with patch.object(self.worker, '_control') as control:
+            for kwargs in ({}, {'live': True}, {'playback': True}):
+                with self.subTest(kwargs=kwargs):
+                    self.worker.start_remote_recording({'channels': 1}, 'audio-dir', **kwargs)
+                    request = control.call_args.args[2]
+                    self.assertEqual(request.options, {'channels': 1})
+                    self.assertFalse(request.playback)
+                    self.assertEqual(control.call_args.args[1], 'live' if kwargs.get('live') else 'record')
 
     async def test_pending_firmware_reservation_blocks_other_commands_without_unlocking_ui(self):
         self.worker._firmware_reserved = True
