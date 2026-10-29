@@ -122,7 +122,6 @@ class WorkerTests(unittest.TestCase):
         self.receive = self.stack.enter_context(patch.object(sdk, "wait_sensor_data", side_effect=receive))
 
         async def auto(ring, **kwargs):
-            self.assertEqual(self.active, 0)
             item = await ring._queues[int(AudioCommand.DATA_FRAME)].get()
             if isinstance(item, Exception):
                 raise item
@@ -491,25 +490,154 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.order, ["disconnect"])
         self.start_report.assert_not_awaited()
 
-    def test_cancel_audio_while_imu_stop_is_pending(self):
+    def test_cancel_audio_before_receiver_starts_keeps_imu(self):
         self.streaming()
-        self.stop_gate = self.gate()
         self.listen()
-        self.feed_audio((2, b"data"))
-        self.assertTrue(self.stopping.wait(3))
-        self.feed(self.batch(88, 8888))
-        self.housekeeping_pass()
-        self.assertEqual(self.source.qsize(), 1)  # Pending is not an active audio consumer.
-        self.assertEqual(self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].qsize(), 1)
-        self.worker.stop_audio()
+
+        def queue_and_cancel():
+            self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].put_nowait((2, b"data"))
+            self.worker._queue_audio("listen", None, "out")
+            self.worker._stop_audio()
+
+        self.worker._loop.call_soon_threadsafe(queue_and_cancel)
         self.event("audio_state", "idle")
-        self.waiting.clear()
-        self.worker._loop.call_soon_threadsafe(self.stop_gate.set)
-        self.assertTrue(self.waiting.wait(3))
+        self.housekeeping_pass()
+        self.assertTrue(self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].empty())
+        self.feed(self.batch(1, 120))
+        self.event("samples")
         self.auto.assert_not_awaited()
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.assertFalse(self.worker._audio_busy)
         self.assertFalse(self.worker._audio_armed)
         self.assertIsNone(self.worker._audio_directory)
+
+    def test_remote_and_live_recording_keep_imu_continuous_through_save(self):
+        from hmm_gesture_studio import remote_audio
+
+        self.streaming()
+        sequence = 0
+        for live in (False, True):
+            with self.subTest(live=live):
+                recording = threading.Event()
+                saving = threading.Event()
+                finish = self.gate()
+                saved = threading.Event()
+                self.addCleanup(saved.set)
+
+                def save_recording(*args, **kwargs):
+                    saving.set()
+                    self.assertTrue(saved.wait(3))
+                    return self.saved
+
+                self.save.side_effect = save_recording
+
+                async def record(ring, options, *, live, stop, emit, save, playback):
+                    self.assertEqual(live, expected_live)
+                    recording.set()
+                    await finish.wait()
+                    await save(b"complete", 7, {})
+
+                expected_live = live
+                with patch.object(remote_audio, "record", side_effect=record):
+                    self.worker.start_remote_recording({}, "out", live=live)
+                    self.assertTrue(recording.wait(3))
+                    for gate in (finish, saved):
+                        self.start_report.assert_awaited_once()
+                        self.stop_report.assert_not_awaited()
+                        sequence += 1
+                        self.feed(self.batch(sequence, 100 + sequence * 20))
+                        self.event("samples")
+                        self.housekeeping_pass()
+                        self.assertEqual(self.worker._stream_state, "active")
+                        if gate is finish:
+                            self.worker._loop.call_soon_threadsafe(gate.set)
+                            self.assertTrue(saving.wait(3))
+                        else:
+                            saved.set()
+                    self.event("audio_saved")
+                    self.event("audio_state", "idle")
+                    sequence += 1
+                    self.feed(self.batch(sequence, 100 + sequence * 20))
+                    self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
+        self.assertEqual(self.max_active, 1)
+        self.assertEqual(self.order.count("drain"), 2)  # Only initial subscription.
+        self.assertEqual([p["state"] for e, p, _ in self.history if e == "stream_state"],
+                         ["waiting", "active"])
+
+    def test_recording_error_ends_only_audio_not_imu(self):
+        from hmm_gesture_studio import remote_audio
+
+        self.streaming()
+        for i, live in enumerate((False, True), 1):
+            with self.subTest(live=live), patch.object(
+                    remote_audio, "record", side_effect=sdk.ProtocolError("incomplete audio")):
+                self.worker.start_remote_recording({}, "out", live=live)
+                self.assertIn("incomplete audio", self.event("error"))
+                self.event("audio_state", "idle")
+                self.feed(self.batch(i, 100 + i * 20))
+                self.event("samples")
+                self.start_report.assert_awaited_once()
+                self.stop_report.assert_not_awaited()
+                self.assertTrue(self.rings[0].is_connected)
+        self.assertIsNone(self.worker._recording_stop)
+        self.save.assert_not_called()
+
+    def test_cancel_recording_keeps_imu_while_waiting_for_audio_cleanup(self):
+        from hmm_gesture_studio import remote_audio
+
+        self.streaming()
+        started = threading.Event()
+        cleaning = threading.Event()
+        release = self.gate()
+
+        async def record(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release.wait()
+
+        with patch.object(remote_audio, "record", side_effect=record):
+            self.worker.start_remote_recording({}, "out", live=True)
+            self.assertTrue(started.wait(3))
+            self.worker.stop_audio()
+            self.assertTrue(cleaning.wait(3))
+            self.worker.stop_audio()  # Must not cancel the cleanup a second time.
+            self.worker.start_calibration("quick")
+            self.assertIn("stop other", self.event("error"))
+            self.worker.start_remote_recording({}, "out")
+            self.assertIn("Stop", self.event("error"))
+            self.assertTrue(self.worker._audio_busy)
+            self.feed(self.batch(1, 120))
+            self.event("samples")
+            self.worker._loop.call_soon_threadsafe(release.set)
+            self.event("audio_state", "idle")
+            self.feed(self.batch(2, 140))
+            self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
+        self.assertIsNone(self.worker._recording_stop)
+        self.assertIsNone(self.worker._audio_task)
+        self.assertIsNone(self.worker._tool_kind)
+        self.save.assert_not_called()
+
+    def test_audio_transport_failure_reconnects_and_cleans_both_owners(self):
+        self.streaming()
+        self.download.side_effect = sdk.TransportError("audio transport lost")
+        self.worker.download_audio(2, "out")
+        self.assertIn("audio transport lost", self.event("reconnecting")["message"])
+        self.event("connected")
+        self.assertEqual(len(self.rings), 2)
+        self.assertFalse(self.worker._audio_busy)
+        self.assertIsNone(self.worker._audio_task)
+        self.assertIsNone(self.worker._audio_pending)
+        self.assertLess(self.order.index("stop"), self.order.index("disconnect"))
+        self.assertEqual(self.max_active, 1)
+        self.save.assert_not_called()
 
     def test_audio_list_uses_count_not_metadata_or_extraction(self):
         self.streaming()
@@ -539,22 +667,20 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.worker._stream_state, "active")
         self.assertEqual(self.max_active, 1)
 
-    def test_auto_file_returns_to_listening_and_fresh_imu(self):
+    def test_auto_file_returns_to_listening_without_restarting_imu(self):
         self.streaming()
         self.listen()
-        self.waiting.clear()
         self.feed_audio((2, b"data"))
         self.assertIs(self.event("audio_saved"), self.saved)
         self.event("audio_state", "listening")
-        self.assertTrue(self.waiting.wait(3))
-        self.feed(self.batch(0, 1))
-        self.event("stream_state", "active")
+        self.feed(self.batch(1, 120))
         self.event("samples")
+        self.assertEqual(self.worker._stream_state, "active")
         self.assertTrue(self.worker._audio_armed)
         self.assertFalse(self.worker._audio_busy)
         self.assertEqual(self.worker._audio_directory, "out")
-        self.assertEqual(self.start_report.await_count, 2)
-        self.stop_report.assert_awaited_once()
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.auto.assert_awaited_once_with(self.rings[0], timeout_s=device.AUDIO_TIMEOUT)
         self.save.assert_called_once_with(b"data", 2, "out", metadata={})
         self.assertEqual(self.max_active, 1)
@@ -576,29 +702,23 @@ class WorkerTests(unittest.TestCase):
         self.stop_report.assert_not_awaited()
         self.auto.assert_not_awaited()
 
-    def test_stop_cancels_auto_transfer_and_finishes_end_before_resuming(self):
+    def test_stop_cancels_auto_transfer_and_finishes_end_without_stopping_imu(self):
         self.audio_gate = self.gate()
         async def end(*args, **kwargs):
-            self.assertEqual(self.active, 0)
             self.order.append("end")
         self.end.side_effect = end
         self.streaming()
         self.listen()
         self.feed_audio((2, b"part"))
         self.event("audio_progress")
-        self.assertEqual(self.active, 0)
         self.worker._loop.call_soon_threadsafe(setattr, self.rings[0], "audio_extract_index", 2)
-        self.worker.retry_imu()
-        self.feed(self.batch(88, 8888))
+        self.feed(self.batch(1, 120))
+        self.event("samples")
         self.housekeeping_pass()
-        self.assertTrue(self.source.empty())
-        # Even retry hints cannot interleave commands with an audio transfer.
         self.start_report.assert_awaited_once()
-        self.stop_report.assert_awaited_once()
-        self.waiting.clear()
+        self.stop_report.assert_not_awaited()
         self.worker.stop_audio()
         self.event("audio_state", "idle")
-        self.assertTrue(self.waiting.wait(3))
         self.end.assert_awaited_once_with(self.rings[0], 2, timeout_s=device.CLEANUP_TIMEOUT, ignore_timeout=True)
         self.assertIsNone(self.rings[0].audio_extract_index)
         self.assertIsNone(self.rings[0].audio_observer)
@@ -607,16 +727,16 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(self.worker._audio_directory)
         self.assertIsNone(self.worker._audio_task)
         self.save.assert_not_called()
-        self.feed(self.batch(0, 1))
-        self.event("stream_state", "active")
+        self.feed(self.batch(2, 140))
         self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.assertEqual(self.max_active, 1)
 
     def test_stop_during_normal_auto_end_finishes_cleanup_after_saving(self):
         ending = threading.Event()
         async def end(*args, **kwargs):
             self.save.assert_called_once()
-            self.assertEqual(self.active, 0)
             if self.end.await_count == 1:
                 ending.set()
                 await asyncio.Event().wait()
@@ -627,10 +747,12 @@ class WorkerTests(unittest.TestCase):
         self.feed_audio((2, b"data"))
         self.event("audio_saved")
         self.assertTrue(ending.wait(3))
-        self.waiting.clear()
+        self.feed(self.batch(1, 120))
+        self.event("samples")
         self.worker.stop_audio()
         self.event("audio_state", "idle")
-        self.assertTrue(self.waiting.wait(3))
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.assertEqual(self.end.await_count, 2)
         self.assertIsNone(self.rings[0].audio_extract_index)
         self.assertIsNone(self.rings[0].audio_observer)
@@ -678,21 +800,23 @@ class WorkerTests(unittest.TestCase):
         self.save.side_effect = save
         self.streaming()
         self.listen()
-        self.waiting.clear()
         self.feed_audio((2, b"first"))
         self.assertTrue(saving.wait(3))
         self.feed_audio((3, b"second"), (4, b"third"))
         self.housekeeping_pass()
         self.assertEqual(self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].qsize(), 2)
         self.assertTrue(self.worker._audio_busy)
-        self.assertEqual(self.active, 0)
+        self.feed(self.batch(1, 120))
+        self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         release.set()
         self.assertEqual([self.event("audio_saved")["file_index"] for _ in range(3)], [2, 3, 4])
         self.event("audio_state", "listening")
-        self.assertTrue(self.waiting.wait(3))
-        self.feed(self.batch(0, 1))
-        self.event("stream_state", "active")
+        self.feed(self.batch(2, 140))
         self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.assertEqual(self.auto.await_count, 3)
         self.assertEqual([call.args for call in self.save.call_args_list], [
             (b"first", 2, "out"), (b"second", 3, "out"), (b"third", 4, "out"),
@@ -706,7 +830,7 @@ class WorkerTests(unittest.TestCase):
         async def download(ring, index, *, quick, progress, timeout_s):
             self.assertEqual(index, 2)
             self.assertFalse(quick)
-            self.assertEqual(self.active, 0)
+            self.stop_report.assert_not_awaited()
             progress(4, 4)
             return SimpleNamespace(record_time=123, data_size=4), b"data"
         self.download.side_effect = download
@@ -720,7 +844,7 @@ class WorkerTests(unittest.TestCase):
         self.worker.download_audio(-1, "out")
         self.assertIn("index", self.event("error"))
 
-    def test_cancel_download_sends_end_before_resuming(self):
+    def test_cancel_download_sends_end_without_stopping_imu(self):
         extracting = threading.Event()
         async def download(*args, **kwargs):
             extracting.set()
@@ -729,29 +853,32 @@ class WorkerTests(unittest.TestCase):
         self.streaming()
         self.worker.download_audio(7, "out")
         self.assertTrue(extracting.wait(3))
+        self.feed(self.batch(1, 120))
+        self.event("samples")
         self.worker.stop_audio()
         self.event("audio_state", "idle")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.end.assert_awaited_once_with(self.rings[0], 7, timeout_s=device.CLEANUP_TIMEOUT, ignore_timeout=True)
         self.save.assert_not_called()
 
-    def test_auto_first_frame_timeout_releases_imu_and_stays_armed(self):
+    def test_auto_first_frame_timeout_keeps_imu_and_stays_armed(self):
         self.streaming()
         self.listen()
-        self.waiting.clear()
         self.feed_audio(sdk.TimeoutError("no first frame"))
         self.event("audio_state", "receiving")
         self.event("audio_state", "listening")
-        self.assertTrue(self.waiting.wait(3))
-        self.feed(self.batch(0, 1))
-        self.event("stream_state", "active")
+        self.feed(self.batch(1, 120))
         self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.assertTrue(self.worker._audio_armed)
         self.assertFalse(self.worker._audio_busy)
         self.auto.assert_awaited_once()
         self.save.assert_not_called()
         self.assertFalse(any(e == "error" for e, _, _ in self.history))
 
-    def test_auto_partial_failure_does_not_save_and_releases_imu(self):
+    def test_auto_partial_failure_does_not_save_or_interrupt_imu(self):
         receive = self.auto.side_effect
         async def broken(ring, **kwargs):
             await receive(ring, **kwargs)
@@ -759,13 +886,13 @@ class WorkerTests(unittest.TestCase):
         self.auto.side_effect = broken
         self.streaming()
         self.listen()
-        self.waiting.clear()
         self.feed_audio((2, b"part"))
         self.assertIn("ring history", self.event("error"))
         self.event("audio_state", "listening")
-        self.assertTrue(self.waiting.wait(3))
-        self.feed(self.batch(0, 1))
+        self.feed(self.batch(1, 120))
         self.event("samples")
+        self.start_report.assert_awaited_once()
+        self.stop_report.assert_not_awaited()
         self.assertTrue(self.worker._audio_armed)
         self.assertFalse(self.worker._audio_busy)
         self.save.assert_not_called()

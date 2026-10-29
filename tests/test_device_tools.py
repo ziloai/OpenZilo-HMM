@@ -19,6 +19,7 @@ class DeviceToolsTests(unittest.IsolatedAsyncioTestCase):
         self.events = []
         self.worker = RingWorker(lambda *item: self.events.append(item))
         self.worker._wake = asyncio.Event()
+        self.worker._audio_wake = asyncio.Event()
         self.worker._telemetry_lock = asyncio.Lock()
         self.worker._address = 'test-device'
         self.ring = SimpleNamespace(is_connected=True, _drain_queue=Mock(),
@@ -134,7 +135,7 @@ class DeviceToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(event == 'tool_state' and payload['state'] == 'idle'
                              for event, payload in self.events))
 
-    async def test_early_finish_is_remembered_while_imu_is_stopping(self):
+    async def test_early_finish_is_remembered_while_audio_is_pending(self):
         self.worker._queue_audio('record', {}, 'out')
         self.worker._finish_recording()
         self.assertTrue(self.worker._recording_stop.is_set())

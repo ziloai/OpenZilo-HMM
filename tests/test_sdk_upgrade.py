@@ -19,6 +19,7 @@ class UpgradeTests(unittest.IsolatedAsyncioTestCase):
     async def test_saved_notification_wakes_auto_receiver(self):
         worker = device.RingWorker(lambda *_: None)
         worker._wake = asyncio.Event()
+        worker._audio_wake = asyncio.Event()
         worker._audio_armed = True
         worker._audio_directory = 'recordings'
         ring = SimpleNamespace(is_connected=True, _queues=defaultdict(asyncio.Queue),

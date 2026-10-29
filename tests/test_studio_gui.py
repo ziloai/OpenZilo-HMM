@@ -789,6 +789,25 @@ class GuiControllerTests(unittest.TestCase):
         self.app.handle("disconnected", None)
         self.assertNotEqual(self.app.acceleration_view.set_stream_state.call_args.args[0]["state"], "active")
 
+    def test_audio_states_keep_raw_imu_curves_and_diagnostics_updating(self):
+        self.app.handle("stream_state", dict(
+            state="active", sample_rate_hz=100, accel_range_g=8, gyro_range_dps=2000,
+        ))
+        states = ("starting", "recording", "live", "downloading", "saving", "stopping", "idle")
+        before = self.app.count
+        for index, state in enumerate(states):
+            with self.subTest(audio_state=state):
+                rows = [[index, 2, 3, 4, 5, 6]]
+                self.app.handle("audio_state", {"state": state})
+                self.app.handle("samples", rows)
+                self.app.plot.append_samples.assert_called_with(rows)
+                self.app.acceleration_view.append_samples.assert_called_with(rows)
+                self.assertTrue(self.app.imu_active)
+                self.assertEqual(self.app.actual_rate, 100)
+                self.assertEqual(self.app.count, before + index + 1)
+        self.app.worker.retry_imu.assert_not_called()
+        self.app.worker.disconnect.assert_not_called()
+
     def test_poll_redraws_acceleration_on_gui_thread(self):
         self.app.poll()
         self.app.acceleration_view.redraw.assert_called_once()
