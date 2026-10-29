@@ -118,7 +118,7 @@ async def record_from_ring(address: str, name: str, reps: int, output_dir: Path)
                 try:
                     batch = await sdk.wait_sensor_data(ring, timeout_s=5.0)
                 except sdk.TimeoutError:
-                    print("\nNo IMU data for 5 s. Check the connection and gesture mode.")
+                    print("\nNo IMU data for 5 s. Check the connection and IMU subscription.")
                     continue
                 if buffer is not None:
                     buffer.extend([

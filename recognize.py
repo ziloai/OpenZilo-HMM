@@ -170,7 +170,7 @@ async def run_realtime(model_dir: Path, address: str, sample_rate: float, cutoff
                         count += 1
                         print(f"  [{count:3d}] 识别到: {name}  (置信度={conf:.3f})")
                 except sdk.TimeoutError:
-                    print("No IMU data for 5 s. Check the connection and gesture mode.")
+                    print("No IMU data for 5 s. Check the connection and IMU subscription.")
         finally:
             print(f"\n已停止，共识别 {count} 次手势")
 

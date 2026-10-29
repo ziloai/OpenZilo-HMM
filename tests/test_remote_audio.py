@@ -255,8 +255,15 @@ class RemoteAudioTests(unittest.IsolatedAsyncioTestCase):
         self.save.assert_not_awaited()
 
     async def test_subscription_failure_never_starts(self):
-        self.open_stream.return_value = SimpleNamespace()  # invalid async context
-        with self.assertRaises(TypeError):
+        class RejectedSubscription:
+            async def __aenter__(self):
+                raise sdk.DeviceError(2, "subscription rejected")
+
+            async def __aexit__(self, *_):
+                pass
+
+        self.open_stream.return_value = RejectedSubscription()
+        with self.assertRaisesRegex(sdk.DeviceError, "subscription rejected"):
             await self.run_record(live=True)
         self.start.assert_not_awaited()
         self.save.assert_not_awaited()
