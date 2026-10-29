@@ -110,6 +110,15 @@ class DeviceToolsTests(unittest.IsolatedAsyncioTestCase):
         saved.assert_awaited_once_with(b'wav-data', 5, 'audio-dir', {'record_time': 123})
         self.assertIsNone(self.worker._recording_stop)
 
+    async def test_pending_firmware_reservation_blocks_other_commands_without_unlocking_ui(self):
+        self.worker._firmware_reserved = True
+        self.worker._accept_audio('listen', None, 'out')
+        self.worker._accept_tool('calibrating', 'quick')
+        self.assertFalse(self.worker._audio_armed)
+        self.assertIsNone(self.worker._tool_pending)
+        self.assertFalse(any(event == 'tool_state' and payload['state'] == 'idle'
+                             for event, payload in self.events))
+
     async def test_early_finish_is_remembered_while_imu_is_stopping(self):
         self.worker._queue_audio('record', {}, 'out')
         self.worker._finish_recording()

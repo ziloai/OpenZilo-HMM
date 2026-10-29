@@ -271,7 +271,7 @@ class RingWorker:
             self._emit("error", "Connect a ring before using audio.")
             self._audio("idle", "Not connected.")
             return
-        if self._audio_busy or self._audio_armed or self._tool_kind:
+        if self._audio_busy or self._audio_armed or self._tool_kind or self._firmware_reserved:
             # Manual extraction shares (and can drain) the auto-push queue.
             self._emit("error", "Stop the current audio operation first.")
             return
@@ -334,11 +334,11 @@ class RingWorker:
     def _accept_tool(self, kind, value):
         if (self._ring is None or not self._ring.is_connected or self._closing
                 or self._disconnecting or self._audio_busy or self._audio_armed
-                or self._tool_kind):
+                or self._tool_kind or (self._firmware_reserved and kind != "firmware")):
             if kind == "firmware":
                 self._firmware_reserved = False
             self._emit("error", "Connect and stop other audio/device operations first.")
-            if not self._tool_kind:
+            if not self._tool_kind and not self._firmware_reserved:
                 self._emit("tool_state", {"state": "idle", "message": "设备操作未启动"})
             return
         self._tool_kind = kind
