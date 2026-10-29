@@ -83,9 +83,13 @@ class TestPipeline(unittest.TestCase):
         required_exports = {
             "OpenZiloClient", "OpenZiloError", "TimeoutError", "SensorDataSample",
             "SensorDataBatch", "get_system_info", "start_sensor_report",
-            "wait_sensor_data", "stop_sensor_report",
+            "wait_sensor_data", "stop_sensor_report", "get_device_capabilities",
+            "DeviceCapabilities", "Packet", "encode_packet", "decode_packet",
         }
         self.assertTrue(required_exports.issubset(sdk.__all__))
+        for name in ("AudioCommand", "SensorCommand", "ErrorCode"):
+            self.assertNotIn(name, sdk.__all__)
+            self.assertFalse(hasattr(sdk, name))
         for script in ("record_gesture.py", "train_hmm.py", "recognize.py"):
             with self.subTest(script=script):
                 self.run_cli(script, "--help")

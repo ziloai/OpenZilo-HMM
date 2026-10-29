@@ -75,6 +75,8 @@ class Studio:
         self.revision = 0
         self.evaluation_revision = None
         self.locked = []
+        from .sdk_controls import SDKControls
+        self.sdk_controls = SDKControls(self)
         self.root.title("OpenZilo 手势与录音工作室")
         self.root.geometry("1060x860")
         self.root.minsize(980, 760)
@@ -91,7 +93,7 @@ class Studio:
         self.log("原始六轴顺序：ax, ay, az, gx, gy, gz；录制/识别保留原始单位，合加速度与方向请看“加速度诊断”页。")
         self.log("响指/敲击请先应用短促动作预设；单类不显示虚构置信度，正样本标定仍不能保证消除误触。")
         self.log("训练、录制和识别必须使用相同采样率。")
-        self.log("实时曲线页可暂停显示；录音页先开启接收，再在戒指上长按录音、松开推送。")
+        self.log("连接后订阅 IMU，无需切换模式；录音页支持远程录音、实时 PCM 保存与保存通知监听。")
 
     def _build(self):
         body = ttk.Frame(self.root, padding=10)
@@ -139,6 +141,8 @@ class Studio:
         self.preview_tab = ttk.Frame(self.tabs, padding=6)
         self.tabs.add(self.preview_tab, text="录制波形（滤波后）")
         self.tabs.add(audio, text="戒指录音")
+        sdk_tools = ttk.Frame(self.tabs, padding=6)
+        self.tabs.add(sdk_tools, text="校准与固件")
         from .plotting import IMUPlot, RecordingPlot
         self.plot = IMUPlot(chart)
         self.plot.widget.pack(fill="both", expand=True)
@@ -159,9 +163,10 @@ class Studio:
         ttk.Label(work, textvariable=self.dir_text).pack(side="left", fill="x", expand=True)
         self.button(work, "选择数据目录", self.choose_directory, lock=True).pack(side="right")
 
-        device = ttk.LabelFrame(body, text="设备连接（切换模式不会主动断开 BLE）", padding=6)
+        device = ttk.LabelFrame(body, text="设备连接（IMU 无需切换模式；功能由设备能力决定）", padding=6)
         device.grid(row=0, column=0, sticky="ew", pady=5)
-        self.button(device, "扫描", lambda: self.request(self.worker.scan)).grid(row=0, column=0)
+        self.scan_button = self.button(device, "扫描", lambda: self.device_request(self.worker.scan))
+        self.scan_button.grid(row=0, column=0)
         device.columnconfigure(1, weight=1)
         self.device_choice = ttk.Combobox(device, state="readonly", width=24)
         self.device_choice.grid(row=0, column=1, padx=5, sticky="ew")
@@ -170,7 +175,8 @@ class Studio:
         ttk.Entry(device, textvariable=self.address, width=24).grid(row=0, column=2)
         self.connect_button = self.button(device, "连接", self.connect)
         self.connect_button.grid(row=0, column=3, padx=5)
-        self.button(device, "断开 / 取消连接", self.disconnect).grid(row=0, column=4)
+        self.disconnect_button = self.button(device, "断开 / 取消连接", self.disconnect)
+        self.disconnect_button.grid(row=0, column=4)
         self.button(device, "清空设备历史", self.clear_device_history).grid(row=0, column=5, padx=5)
         self.status = tk.StringVar(value="未连接；可扫描或直接输入地址")
         connection_status = ttk.Frame(device)
@@ -181,9 +187,10 @@ class Studio:
         self.battery_label.pack(side="right", padx=(10, 0))
         self.raw = tk.StringVar(value="ax / ay / az / gx / gy / gz：—；样本数：0")
         ttk.Label(device, textvariable=self.raw).grid(row=2, column=0, columnspan=5, sticky="w")
-        self.stream_text = tk.StringVar(value="IMU 未就绪；连接后自动等待手势模式")
+        self.stream_text = tk.StringVar(value="IMU 未就绪；连接后自动订阅，无需切换模式")
         ttk.Label(device, textvariable=self.stream_text).grid(row=3, column=0, columnspan=4, sticky="w")
-        self.button(device, "重试 IMU 上报", lambda: self.request(self.worker.retry_imu)).grid(row=3, column=4)
+        self.retry_imu_button = self.button(device, "重试 IMU 上报", lambda: self.device_request(self.worker.retry_imu, imu=True))
+        self.retry_imu_button.grid(row=3, column=4)
 
         recording = ttk.LabelFrame(gesture, text="录制数据（每次至少 12 个样本）", padding=6)
         recording.grid(row=1, column=0, sticky="ew", pady=5)
@@ -260,8 +267,9 @@ class Studio:
         self.export_button.pack(side="left")
         self.export_button.configure(state="disabled")
         self.live = tk.BooleanVar(value=False)
-        ttk.Checkbutton(model_actions, text="实时试识别", variable=self.live,
-                        command=self.toggle_live).pack(side="left", padx=10)
+        self.live_button = ttk.Checkbutton(model_actions, text="实时试识别", variable=self.live,
+                                           command=self.toggle_live)
+        self.live_button.pack(side="left", padx=10)
         self.model_text = tk.StringVar(value="尚未训练或加载模型")
         ttk.Label(model, textvariable=self.model_text, wraplength=940).pack(anchor="w")
         self.result = tk.StringVar(value="识别结果：—")
@@ -276,23 +284,26 @@ class Studio:
         bar = ttk.Scrollbar(logs, command=self.log_widget.yview)
         bar.pack(side="right", fill="y")
         self.log_widget.configure(yscrollcommand=bar.set)
+        self.sdk_controls.build_tools(sdk_tools)
 
     def _build_audio(self, parent):
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(4, weight=1)
-        ttk.Label(parent, text="先开启接收，再将戒指切到录音模式：长按戒指按键录音，松开后自动推送文件。\n"
-                  "SDK 不支持电脑开始/停止录音；待机监听不阻塞手势，仅传输时暂停 IMU，切回手势模式自动恢复。\n"
-                  "原始 .bin 始终保留；安装 ffmpeg 后同时转为可播放 WAV。若漏收或中断，可从历史录音重新下载。",
-                  wraplength=900).grid(row=0, column=0, sticky="w", pady=8)
+        parent.rowconfigure(5, weight=1)
+        recording = ttk.Frame(parent)
+        recording.grid(row=0, column=0, sticky="ew", columnspan=2)
+        self.sdk_controls.build_audio(recording)
+        ttk.Label(parent, text="保存通知监听：戒指录音保存后，按通知索引自动下载。待机监听不阻塞手势，传输时暂停 IMU。\n"
+                  "保留原始音频并解码 WAV；若漏收或中断，可查询历史录音重新下载。无需切换手势模式。",
+                  wraplength=900).grid(row=1, column=0, sticky="w", pady=8)
         directory = ttk.Frame(parent)
-        directory.grid(row=1, column=0, sticky="ew", pady=6)
+        directory.grid(row=2, column=0, sticky="ew", pady=6)
         self.audio_dir_text = tk.StringVar(value=str(self.audio_directory))
         ttk.Label(directory, textvariable=self.audio_dir_text).pack(side="left", fill="x", expand=True)
         self.audio_dir_button = self.button(directory, "选择录音目录", self.choose_audio_directory)
         self.audio_dir_button.pack(side="right")
         controls = ttk.Frame(parent)
-        controls.grid(row=2, column=0, sticky="ew", pady=6)
-        self.audio_start_button = self.button(controls, "开启自动接收", self.start_audio)
+        controls.grid(row=3, column=0, sticky="ew", pady=6)
+        self.audio_start_button = self.button(controls, "开启保存通知监听", self.start_audio)
         self.audio_start_button.pack(side="left")
         self.audio_stop_button = self.button(controls, "停止接收 / 下载", self.stop_audio)
         self.audio_stop_button.pack(side="left", padx=6)
@@ -300,7 +311,7 @@ class Studio:
         self.audio_text = tk.StringVar(value="未开启接收")
         ttk.Label(controls, textvariable=self.audio_text, wraplength=630).pack(side="left", padx=10)
         remote = ttk.Frame(parent)
-        remote.grid(row=3, column=0, sticky="ew", pady=6)
+        remote.grid(row=4, column=0, sticky="ew", pady=6)
         self.audio_list_button = self.button(remote, "查询戒指历史录音", self.list_audio)
         self.audio_list_button.pack(side="left")
         self.remote_audio_choice = ttk.Combobox(remote, state="readonly", width=35)
@@ -311,18 +322,18 @@ class Studio:
         for key, label, width in (("file", "本次会话保存的文件", 500), ("duration", "音频时长", 100), ("size", "大小", 100)):
             self.audio_tree.heading(key, text=label)
             self.audio_tree.column(key, width=width)
-        self.audio_tree.grid(row=4, column=0, sticky="nsew", pady=8)
+        self.audio_tree.grid(row=5, column=0, sticky="nsew", pady=8)
         bar = ttk.Scrollbar(parent, command=self.audio_tree.yview)
-        bar.grid(row=4, column=1, sticky="ns")
+        bar.grid(row=5, column=1, sticky="ns")
         self.audio_tree.configure(yscrollcommand=bar.set)
         actions = ttk.Frame(parent)
-        actions.grid(row=5, column=0, sticky="w")
+        actions.grid(row=6, column=0, sticky="w")
         self.button(actions, "打开选中文件", self.open_audio_file).pack(side="left")
         self.button(actions, "打开录音目录", lambda: self.open_path(self.audio_directory)).pack(side="left", padx=6)
 
     def choose_audio_directory(self):
-        if self.audio_state != "idle":
-            self.error("接收、下载或保存期间不能更改目录。")
+        if self.sdk_controls.busy or self.audio_state != "idle":
+            self.error("工具运行、录音、接收、下载或保存期间不能更改目录。")
             return
         path = filedialog.askdirectory(parent=self.root, initialdir=str(self.audio_directory.parent))
         if path:
@@ -330,27 +341,31 @@ class Studio:
             self.audio_dir_text.set(str(self.audio_directory))
 
     def start_audio(self):
-        if not self.connected or self.audio_state != "idle":
-            self.error("请先连接戒指，并等待上次接收或保存结束。")
+        if not self.sdk_controls.available("audio"):
+            self.error("请连接支持录音的戒指，并等待手势录制、音频或工具结束。")
             return
-        if self.take is not None:
-            self.error("请先停止本次手势录制，再开启录音接收。")
-            return
-        self.set_audio_state({"state": "starting", "message": "正在开启自动监听（不占用手势采集）…"})
+        self.set_audio_state({"state": "starting", "message": "正在开启保存通知监听（不占用手势采集）…"})
         if not self.request(lambda: self.worker.start_audio(self.audio_directory)):
             self.set_audio_state({"state": "idle", "message": "开启接收失败"})
 
     def stop_audio(self):
+        if self.sdk_controls.busy:
+            return
+        if self.sdk_controls.remote_session or self.audio_state in {"recording", "live"}:
+            self.sdk_controls.finish_recording()
+            return
         if self.audio_state not in {"idle", "saving", "stopping"}:
             if self.audio_state in {"receiving", "downloading"} and not messagebox.askyesno(
                     "中断音频传输？", "未接收完整的文件不会保存。之后可从戒指历史录音重新下载。", parent=self.root):
+                return
+            if self.sdk_controls.busy:
                 return
             self.set_audio_state({"state": "stopping", "message": "正在停止电脑端接收（不控制戒指录音）…"})
             self.request(self.worker.stop_audio)
 
     def list_audio(self):
-        if not self.connected or self.audio_state != "idle" or self.take is not None:
-            self.error("请先连接戒指，停止手势录制和音频接收/下载后再查询。")
+        if not self.sdk_controls.available("audio"):
+            self.error("请连接支持录音的戒指，停止手势录制、音频和工具后再查询。")
             return
         self.stop_live()
         self.set_audio_state({"state": "listing", "message": "正在查询历史录音…"})
@@ -359,7 +374,7 @@ class Studio:
 
     def download_audio(self):
         selected = self.remote_audio_choice.get()
-        if not self.connected or self.audio_state != "idle" or self.take is not None or selected not in self.remote_audio_files:
+        if not self.sdk_controls.available("audio") or selected not in self.remote_audio_files:
             self.error("请先查询并选择历史录音，停止当前手势录制/音频接收后再下载。")
             return
         self.stop_live()
@@ -370,14 +385,9 @@ class Studio:
     def set_audio_state(self, payload):
         self.audio_state = payload["state"]
         self.audio_text.set(payload.get("message", self.audio_state))
-        idle = self.audio_state == "idle"
-        self.audio_start_button.configure(state="normal" if idle and self.connected else "disabled")
-        self.audio_stop_button.configure(state="normal" if self.audio_state not in {"idle", "saving", "stopping"} else "disabled")
-        self.audio_dir_button.configure(state="normal" if idle else "disabled")
-        self.audio_list_button.configure(state="normal" if idle and self.connected else "disabled")
-        self.audio_download_button.configure(state="normal" if idle and self.connected and self.remote_audio_files else "disabled")
         if self.audio_state in {"idle", "listening"} and self.imu_active and self.live.get() and self.recognizer is None:
             self.toggle_live()
+        self.sdk_controls.refresh()
 
     def open_path(self, path):
         try:
@@ -411,6 +421,13 @@ class Studio:
     def error(self, text):
         self.log(f"错误：{text}")
         messagebox.showerror("操作失败", str(text), parent=self.root)
+
+    def device_request(self, action, *, imu=False):
+        if self.sdk_controls.busy or (imu and (not self.connected or self.audio_state != "idle"
+                                              or not self.sdk_controls.capabilities.get("imu", False))):
+            self.error("请等待当前操作结束；IMU 需要已连接且支持此能力的设备。")
+            return False
+        return self.request(action)
 
     def request(self, action):
         if self.closing:
@@ -592,6 +609,7 @@ class Studio:
         self.take_text.set(f"未保存：{len(lengths)} 次，长度 {lengths}{active}")
         self.record_button.configure(text="停止并保留本次" if self.take is not None else "开始一次录制")
         self.name_entry.configure(state="disabled" if self.pending or self.take is not None or self.training or self.closing else "normal")
+        self.sdk_controls.refresh()
 
     def cancel_take(self):
         if self.take is not None:
@@ -779,6 +797,9 @@ class Studio:
         self.address.set(self.devices.get(self.device_choice.get(), ""))
 
     def connect(self):
+        if self.sdk_controls.busy:
+            self.error("请等待工具操作完成后再连接。")
+            return
         address = self.address.get().strip()
         if not address:
             self.error("请先选择设备或输入地址。")
@@ -796,11 +817,19 @@ class Studio:
         if not self.request(lambda: self.worker.connect(address)):
             self.connecting = False
             self.status.set("连接失败")
+        self.sdk_controls.refresh()
 
     def disconnect(self):
-        if self.audio_state != "idle" and not messagebox.askyesno(
-                "音频接收尚未结束", "断开将停止电脑接收/下载，不控制戒指录音。未完整接收的文件需之后重新下载。继续？", parent=self.root):
+        if self.sdk_controls.firmware_locked:
+            self.error("固件升级进行中，不能断开；请等待完成或超时。")
             return
+        if self.audio_state != "idle" and not messagebox.askyesno(
+                "音频尚未结束", "断开将停止接收/下载；远程录音采用断线停止策略。未完整接收的音频不会标为完整文件，设备副本可之后查询。继续？", parent=self.root):
+            return
+        if self.sdk_controls.firmware_locked:
+            return
+        self.sdk_controls.capabilities = {}
+        self.sdk_controls.connection_epoch += 1
         self.set_stream_state({"state": "waiting", "message": "IMU 已停止"})
         self.cancel_take()
         self.stop_live()
@@ -810,11 +839,15 @@ class Studio:
         self.set_battery_status()
         self.status.set("正在断开")
         self.request(self.worker.disconnect)
+        self.sdk_controls.refresh()
 
     def toggle_record(self):
         # Process already-received batches at the boundary so idle samples do
         # not leak into a new take, and the last batch is retained on stop.
         self.drain_events()
+        if self.sdk_controls.busy:
+            self.error("工具操作期间不能录制手势。")
+            return
         if self.take is not None:
             samples = self.take
             self.take = None
@@ -835,7 +868,7 @@ class Studio:
                     self.error(str(exc))
             self.update_takes()
             return
-        if not self.connected or not self.imu_active or self.audio_state not in {"idle", "listening"} or not self.name.get().strip():
+        if not self.connected or not self.imu_active or not self.sdk_controls.capabilities.get("imu", False) or self.audio_state not in {"idle", "listening"} or not self.name.get().strip():
             self.error("请输入手势名称，等待 IMU 恢复上报；录音期间不能录制手势。")
             return
         if self.pending and not self.same_rate(self.pending_rate, self.actual_rate):
@@ -1066,7 +1099,7 @@ class Studio:
         try:
             if self.training or self.bundle is None or self.stale:
                 raise ValueError("请先训练有效模型或加载模型包。")
-            if not self.connected or not self.imu_active or self.audio_state not in {"idle", "listening"}:
+            if self.sdk_controls.busy or not self.connected or not self.imu_active or not self.sdk_controls.capabilities.get("imu", False) or self.audio_state not in {"idle", "listening"}:
                 raise ValueError("请先连接设备并等待 IMU 恢复上报；录音期间不能试识别。")
             if not self.same_rate(self.actual_rate, self.bundle.pipeline.sample_rate_hz):
                 raise ValueError(f"采样率不匹配：设备 {self.actual_rate:g} Hz，模型 {self.bundle.pipeline.sample_rate_hz:g} Hz。")
@@ -1082,7 +1115,7 @@ class Studio:
             self.error(str(exc))
 
     def samples(self, payload):
-        if not self.connected or not self.imu_active or not payload:
+        if self.sdk_controls.busy or not self.connected or not self.imu_active or not payload:
             return
         self.plot.append_samples(payload)
         self.acceleration_view.append_samples(payload)
@@ -1131,7 +1164,7 @@ class Studio:
 
     def set_stream_state(self, payload):
         active = payload["state"] == "active"
-        message = payload.get("message", "IMU 正常上报" if active else "IMU 暂停，等待手势模式")
+        message = payload.get("message", "IMU 正常上报" if active else "IMU 暂停，等待恢复订阅（无需切换模式）")
         if active:
             rate = float(payload["sample_rate_hz"])
             if not self.imu_active or not self.same_rate(self.actual_rate, rate):
@@ -1160,6 +1193,7 @@ class Studio:
         self.plot.set_status(message)
         if active and self.live.get() and self.recognizer is None and self.audio_state in {"idle", "listening"}:
             self.toggle_live()
+        self.sdk_controls.refresh()
 
     def set_battery_status(self, payload=None):
         """Render only reported values; 0% is valid, absent/out-of-range is not."""
@@ -1181,6 +1215,8 @@ class Studio:
         self.battery_label.configure(foreground=color)
 
     def handle(self, event, payload):
+        if self.sdk_controls.handle(event, payload):
+            return
         if event == "samples":
             self.samples(payload)
         elif event == "devices":
@@ -1240,7 +1276,8 @@ class Studio:
             item = self.audio_tree.insert("", "end", values=(path.name, f"{duration:.1f} s" if duration is not None else "未解码",
                                                            f"{path.stat().st_size / 1024:.1f} KiB"))
             self.audio_files[item] = path
-            self.log(f"录音已保存：{path}；原始文件：{payload['raw_path']}")
+            raw_path = payload.get("raw_path")
+            self.log(f"录音已保存：{path}" + (f"；原始文件：{raw_path}" if raw_path else ""))
         elif event in ("warning", "error", "progress"):
             self.log(f"{event}：{payload}")
         elif event == "trained":
@@ -1273,12 +1310,18 @@ class Studio:
             self.error(payload)
 
     def close(self):
+        if self.sdk_controls.firmware_locked:
+            self.error("固件升级进行中，不能退出；请等待完成或超时。")
+            return
         if self.closing or not self.confirm_discard():
             return
         if self.training and not messagebox.askyesno("训练 / 评估尚未完成", "关闭窗口将放弃本次结果；后台计算可能稍后才结束。继续？", parent=self.root):
             return
         if self.audio_state != "idle" and not messagebox.askyesno(
-                "音频接收尚未结束", "退出将停止电脑接收/下载，不控制戒指录音。完整收到的音频会继续保存；未完整文件需重新下载。继续？", parent=self.root):
+                "音频尚未结束", "退出将停止接收/下载；远程录音采用断线停止策略。完整音频会继续保存，未完整音频不会标为完整文件。继续？", parent=self.root):
+            return
+        # Modal confirmations pump events; OTA may have started in the meantime.
+        if self.sdk_controls.firmware_locked:
             return
         self.closing = True
         self.cancel_take()

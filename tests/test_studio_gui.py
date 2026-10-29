@@ -17,6 +17,7 @@ from hmm_gesture_studio import gui
 from hmm_gesture_studio.datasets import GestureDataset, dataset_path, load_dataset, save_dataset
 from hmm_gesture_studio.training import train_datasets
 from hmm_gesture_studio.device_history import DeviceHistory
+from hmm_gesture_studio.sdk_controls import SDKControls
 
 
 class Var:
@@ -109,6 +110,8 @@ class GuiControllerTests(unittest.TestCase):
         app.error = Mock()
         app.executor = Mock()
         app.executor.submit.side_effect = lambda run: run()
+        app.sdk_controls = SDKControls(app)
+        app.sdk_controls.capabilities = dict(recording_control=True, live_audio=True, imu=True, ota=True)
 
     def record(self, count=16, value=1):
         self.app.toggle_record()

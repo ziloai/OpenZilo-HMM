@@ -27,7 +27,9 @@ legacy CLI ── ring_stream.py ── OpenZilo SDK
 
 Studio 的 `device.py` 把 BLE 连接与 IMU 就绪状态分开。只有收到新 IMU 批次才报告可采集；停报或 DEVICE_BUSY 保留 BLE，等待重试，实际断连才退避重连。数据间断会通知 GUI 取消未完成手势并重置分段。原 `ring_stream.py` 继续服务旧命令行，不改变其一次性采集语义。
 
-自动音频监听是被动订阅，没有音频帧时不占用 IMU 消费者；检测到音频队列有帧后，由同一业务消费者串行暂停 IMU、接收一个完整文件，再恢复探测。列表查询、下载仍串行处理，SDK 请求/分片写入额外加锁；取消不会中断半条发送。录音由戒指长按/松开触发，Studio 无远程录音控制接口。`audio.py` 先保存完整原始文件，再用有时限的外部 ffmpeg 转 WAV；解码失败不丢原数据。`plotting.py` 只在 Tk 主线程绘制有界滚动数据及识别片段框，录制预览复用训练的 `SignalFilter` 并保留浮点输出，不修改原始录制。`device_history.py` 以原子 JSON 写入本机用户配置目录，仅保存成功连接的最近 20 台设备，不依赖工作目录。不新增运行时依赖，也不影响训练/推理包边界。详情见 [Studio 指南](../studio/README.md)。
+自动音频监听没有待处理通知时不占用 IMU；检测到保存通知或音频帧后，由同一业务消费者暂停 IMU、接收完整文件，再恢复探测。SDK 0.6.2 自带请求/写锁，Studio 不重复获取 SDK 写锁，只保留发送取消保护与传输观察。远程 FLASH 录音确认保存后下载；实时 LIVE_AND_FLASH 通过 PyAV 接收 PCM，完整 END 后才保存 WAV。下载文件先保存原始字节，再用有时限的 ffmpeg 转 WAV；解码失败不丢原数据。`plotting.py` 只在 Tk 主线程绘制有界滚动数据及识别片段框，录制预览复用训练的 `SignalFilter` 并保留浮点输出，不修改原始录制。`device_history.py` 以原子 JSON 写入本机用户配置目录，仅保存成功连接的最近 20 台设备，不依赖工作目录。Studio 新增的 SDK `pcm` extra 与签名校验依赖不进入独立推理包。详情见 [Studio 指南](../studio/README.md)。
+
+“校准与固件”使用同一 BLE worker：校准向导拥有独立 IMU 消费者，校准诊断通过单独事件展示物理单位，绝不送入原始整数模型流水线。OTA 独占连接，包括预期的重启/重连，停止在途与周期电量查询，不被普通掉线重连逻辑干扰；任何 OTA 尝试后结束当前 Studio 会话，不自动重试。关键边界见 [Studio 设备工具契约](../studio/SPEC.md)。
 
 ## uv 工作区与依赖管理
 

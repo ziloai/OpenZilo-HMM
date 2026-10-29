@@ -19,6 +19,7 @@ import openzilo as sdk
 from hmm_gesture_studio import device
 from hmm_gesture_studio.device import RingWorker, _StudioClient
 from hmm_gesture_studio.ring_stream import open_ring_stream
+from hmm_gesture_studio.wire import AudioCommand, ErrorCode, SensorCommand
 
 
 class WorkerTests(unittest.TestCase):
@@ -66,7 +67,7 @@ class WorkerTests(unittest.TestCase):
                 q = ring._queues[command]
                 while not q.empty():
                     q.get_nowait()
-                if command == int(sdk.SensorCommand.DATA_FRAME):
+                if command == int(SensorCommand.DATA_FRAME):
                     self.order.append("drain")
                     while not self.source.empty():
                         self.source.get_nowait()
@@ -81,8 +82,20 @@ class WorkerTests(unittest.TestCase):
             return_value=SimpleNamespace(model="ring", firmware_version="1", battery_percent=90,
                                          battery_charging=False),
         ))
+        async def capabilities(ring):
+            self.order.append("capabilities")
+            return sdk.DeviceCapabilities(source="test", firmware_version="1", model="ring")
+
+        self.capabilities = self.stack.enter_context(patch.object(
+            sdk, "get_device_capabilities", side_effect=capabilities,
+        ))
+
+        async def start(ring, **kwargs):
+            self.order.append("start")
+            return self.start_report.return_value
+
         self.start_report = self.stack.enter_context(patch.object(
-            sdk, "start_sensor_report", new_callable=AsyncMock, return_value=self.start_info,
+            sdk, "start_sensor_report", side_effect=start, return_value=self.start_info,
         ))
 
         async def stop(*args, **kwargs):
@@ -110,7 +123,7 @@ class WorkerTests(unittest.TestCase):
 
         async def auto(ring, **kwargs):
             self.assertEqual(self.active, 0)
-            item = await ring._queues[int(sdk.AudioCommand.DATA_FRAME)].get()
+            item = await ring._queues[int(AudioCommand.DATA_FRAME)].get()
             if isinstance(item, Exception):
                 raise item
             ring.audio_observer(SimpleNamespace(frame_offset=0, data=item[1]))
@@ -169,7 +182,7 @@ class WorkerTests(unittest.TestCase):
     def feed_audio(self, *values):
         def push():
             for value in values:
-                self.rings[-1]._queues[int(sdk.AudioCommand.DATA_FRAME)].put_nowait(value)
+                self.rings[-1]._queues[int(AudioCommand.DATA_FRAME)].put_nowait(value)
         self.worker._loop.call_soon_threadsafe(push)
 
     def housekeeping_pass(self):
@@ -269,9 +282,12 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.active, 0)
         self.assertLess(self.order.index("stop"), self.order.index("disconnect"))
         self.assertEqual(len(self.rings), 1)
+        self.capabilities.assert_awaited_once_with(self.rings[0])
+        self.assertLess(self.order.index("connect"), self.order.index("capabilities"))
+        self.assertLess(self.order.index("capabilities"), self.order.index("start"))
 
     def test_busy_initial_connection_survives_and_retries(self):
-        self.start_report.side_effect = [sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY), self.start_info]
+        self.start_report.side_effect = [sdk.DeviceError(ErrorCode.DEVICE_BUSY), self.start_info]
         self.connect()
         self.event("stream_state", "suspended")
         self.assertTrue(self.rings[0].is_connected)
@@ -289,7 +305,7 @@ class WorkerTests(unittest.TestCase):
             nonlocal attempts
             attempts += 1
             if attempts == 1:
-                raise sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY)
+                raise sdk.DeviceError(ErrorCode.DEVICE_BUSY)
             return self.start_info
         self.start_report.side_effect = start
         self.connect()
@@ -300,18 +316,18 @@ class WorkerTests(unittest.TestCase):
         self.event("samples")
         self.assertEqual(len(self.rings), 1)
 
-    def test_armed_listener_recovers_from_recording_busy_to_gesture_mode(self):
-        gesture_mode = threading.Event()
+    def test_armed_listener_recovers_when_recording_is_no_longer_busy(self):
+        available = threading.Event()
         async def start(*args, **kwargs):
-            if not gesture_mode.is_set():
-                raise sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY)
+            if not available.is_set():
+                raise sdk.DeviceError(ErrorCode.DEVICE_BUSY)
             return self.start_info
         self.start_report.side_effect = start
         self.connect()
         self.event("stream_state", "suspended")
         self.listen()
-        gesture_mode.set()
-        # No audio, key event or manual retry is needed to recover gesture mode.
+        available.set()
+        # No audio, key event or manual retry is needed to resume subscription.
         self.assertTrue(self.waiting.wait(3))
         self.feed(self.batch())
         self.event("stream_state", "active")
@@ -348,8 +364,8 @@ class WorkerTests(unittest.TestCase):
 
     def test_timeout_busy_then_new_stream_has_fresh_boundary(self):
         self.streaming()
-        self.start_report.side_effect = [sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY), self.start_info]
-        self.feed(sdk.TimeoutError("mode changed"))
+        self.start_report.side_effect = [sdk.DeviceError(ErrorCode.DEVICE_BUSY), self.start_info]
+        self.feed(sdk.TimeoutError("reports paused"))
         self.event("stream_state", "suspended")
         self.waiting.clear()
         # Two explicit retry hints are harmless; only one consumer exists.
@@ -391,6 +407,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.event("reconnecting")["attempt"], 1)
         self.event("connected")
         self.assertEqual([r.address for r in self.rings], ["manual-address"] * 2)
+        self.assertEqual([call.args for call in self.capabilities.await_args_list],
+                         [(ring,) for ring in self.rings])
 
     def test_reconnect_and_close_clear_passive_audio_subscription(self):
         self.streaming()
@@ -482,7 +500,7 @@ class WorkerTests(unittest.TestCase):
         self.feed(self.batch(88, 8888))
         self.housekeeping_pass()
         self.assertEqual(self.source.qsize(), 1)  # Pending is not an active audio consumer.
-        self.assertEqual(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].qsize(), 1)
+        self.assertEqual(self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].qsize(), 1)
         self.worker.stop_audio()
         self.event("audio_state", "idle")
         self.waiting.clear()
@@ -551,7 +569,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(self.worker._audio_directory)
         self.feed_audio((2, b"late"))
         self.housekeeping_pass()
-        self.assertTrue(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].empty())
+        self.assertTrue(self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].empty())
         self.feed(self.batch(1, 101))
         self.event("samples")
         self.start_report.assert_awaited_once()
@@ -665,7 +683,7 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(saving.wait(3))
         self.feed_audio((3, b"second"), (4, b"third"))
         self.housekeeping_pass()
-        self.assertEqual(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].qsize(), 2)
+        self.assertEqual(self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].qsize(), 2)
         self.assertTrue(self.worker._audio_busy)
         self.assertEqual(self.active, 0)
         release.set()
@@ -679,7 +697,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual([call.args for call in self.save.call_args_list], [
             (b"first", 2, "out"), (b"second", 3, "out"), (b"third", 4, "out"),
         ])
-        self.assertTrue(self.rings[0]._queues[int(sdk.AudioCommand.DATA_FRAME)].empty())
+        self.assertTrue(self.rings[0]._queues[int(AudioCommand.DATA_FRAME)].empty())
         self.assertTrue(self.worker._audio_armed)
         self.assertFalse(self.worker._audio_busy)
         self.assertEqual(self.max_active, 1)
@@ -857,13 +875,13 @@ class WorkerTests(unittest.TestCase):
         done = threading.Event()
         async def check():
             ring = self.rings[0]
-            ring._queues[int(sdk.AudioCommand.DATA_FRAME)].put_nowait(object())
+            ring._queues[int(AudioCommand.DATA_FRAME)].put_nowait(object())
             ring._queues[0x0704].put_nowait(object())
             task = asyncio.create_task(self.worker._housekeeping(ring))
             await asyncio.sleep(0)  # Run precisely one housekeeping pass.
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            self.assertTrue(ring._queues[int(sdk.AudioCommand.DATA_FRAME)].empty())
+            self.assertTrue(ring._queues[int(AudioCommand.DATA_FRAME)].empty())
             self.assertTrue(ring._queues[0x0704].empty())
             done.set()
         future = asyncio.run_coroutine_threadsafe(check(), self.worker._loop)
@@ -889,6 +907,7 @@ class BatteryMonitorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.events = []
         self.worker = RingWorker(lambda event, payload: self.events.append((event, payload)))
+        self.worker._telemetry_lock = asyncio.Lock()
         self.ring = SimpleNamespace(is_connected=True)
         self.ticks, self.ready = asyncio.Queue(), asyncio.Queue()
         self.delays = []
@@ -941,7 +960,7 @@ class BatteryMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.query.assert_awaited_once()
 
     async def test_optional_read_failures_clear_stale_value_and_retry_without_ending_session(self):
-        for error in (sdk.TimeoutError("timeout"), sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY),
+        for error in (sdk.TimeoutError("timeout"), sdk.DeviceError(ErrorCode.DEVICE_BUSY),
                       sdk.ProtocolError("bad response"), sdk.TransportError("write failed")):
             with self.subTest(error=type(error).__name__):
                 self.query.side_effect = [error, self.info]
@@ -1021,25 +1040,79 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(sdk.TransportError, "lost link"):
             await ring.send_command(1)
 
-    async def test_complete_requests_are_serialized(self):
-        started = asyncio.Event()
-        release = asyncio.Event()
-        calls = []
-        async def request(*args, **kwargs):
-            calls.append("begin")
-            started.set()
-            await release.wait()
-            calls.append("end")
-        ring = _StudioClient(transport=SimpleNamespace())
-        with patch.object(sdk.OpenZiloClient, "request", side_effect=request):
-            first = asyncio.create_task(ring.request(1, 2))
-            await started.wait()
-            second = asyncio.create_task(ring.request(3, 4))
-            await asyncio.sleep(0)
-            self.assertEqual(calls, ["begin"])
-            release.set()
-            await asyncio.gather(first, second)
-        self.assertEqual(calls, ["begin", "end", "begin", "end"])
+    async def request_client(self):
+        class PacketTransport:
+            is_connected = False
+
+            def __init__(self):
+                self.sent = asyncio.Queue()
+
+            def set_rx_callback(self, callback):
+                self.receive = callback
+
+            async def connect(self):
+                self.is_connected = True
+
+            async def disconnect(self):
+                self.is_connected = False
+
+            async def write(self, data):
+                self.sent.put_nowait(sdk.decode_packet(data))
+
+            def respond(self, packet):
+                self.receive(sdk.encode_packet(packet.command, packet.body))
+
+        transport = PacketTransport()
+        ring = _StudioClient(transport=transport)
+        await ring.connect()
+        self.addAsyncCleanup(ring.disconnect)
+        return ring, transport
+
+    def request_task(self, ring, command, response):
+        task = asyncio.create_task(ring.request(command, response, timeout_s=1))
+
+        async def cleanup():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        self.addAsyncCleanup(cleanup)
+        return task
+
+    async def test_requests_with_same_response_are_serialized(self):
+        ring, transport = await self.request_client()
+        first = self.request_task(ring, 0xF001, 0xF002)
+        sent = await asyncio.wait_for(transport.sent.get(), 1)
+        self.assertIsInstance(sent, sdk.Packet)
+        self.assertEqual(sent.command, 0xF001)
+        second = self.request_task(ring, 0xF003, 0xF002)
+        # The second request cannot write while the first awaits its response.
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(transport.sent.get(), 0.05)
+        self.assertFalse(first.done())
+        self.assertFalse(second.done())
+        transport.respond(sdk.Packet(0xF002, b"first"))
+        self.assertEqual((await asyncio.wait_for(first, 1)).body, b"first")
+        sent = await asyncio.wait_for(transport.sent.get(), 1)
+        self.assertEqual(sent.command, 0xF003)
+        transport.respond(sdk.Packet(0xF002, b"second"))
+        self.assertEqual((await asyncio.wait_for(second, 1)).body, b"second")
+        self.assertTrue(transport.sent.empty())
+
+    async def test_requests_with_different_responses_can_overlap(self):
+        ring, transport = await self.request_client()
+        first = self.request_task(ring, 0xF001, 0xF002)
+        self.assertEqual((await asyncio.wait_for(transport.sent.get(), 1)).command, 0xF001)
+        second = self.request_task(ring, 0xF003, 0xF004)
+        self.assertEqual((await asyncio.wait_for(transport.sent.get(), 1)).command, 0xF003)
+        self.assertFalse(first.done())
+        self.assertFalse(second.done())
+        # A different response may finish first without consuming the first reply.
+        transport.respond(sdk.Packet(0xF004, b"second"))
+        self.assertEqual((await asyncio.wait_for(second, 1)).body, b"second")
+        self.assertFalse(first.done())
+        transport.respond(sdk.Packet(0xF002, b"first"))
+        self.assertEqual((await asyncio.wait_for(first, 1)).body, b"first")
+        self.assertTrue(transport.sent.empty())
 
 
 class StreamTests(unittest.IsolatedAsyncioTestCase):
@@ -1058,12 +1131,22 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch(
             "hmm_gesture_studio.ring_stream.sdk.OpenZiloClient", side_effect=client,
         ))
-        self.stack.enter_context(patch(
+        self.info = self.stack.enter_context(patch(
             "hmm_gesture_studio.ring_stream.sdk.get_system_info", new_callable=AsyncMock,
             return_value=SimpleNamespace(model="ring", firmware_version="1", battery_percent=90),
         ))
+        async def capabilities(ring):
+            self.info.assert_awaited_once_with(ring)
+            self.order.append("capabilities")
+        self.capabilities = self.stack.enter_context(patch(
+            "hmm_gesture_studio.ring_stream.sdk.get_device_capabilities", side_effect=capabilities,
+        ))
+        async def start(ring):
+            self.capabilities.assert_awaited_once_with(ring)
+            self.order.append("start")
+            return self.start.return_value
         self.start = self.stack.enter_context(patch(
-            "hmm_gesture_studio.ring_stream.sdk.start_sensor_report", new_callable=AsyncMock,
+            "hmm_gesture_studio.ring_stream.sdk.start_sensor_report", side_effect=start,
             return_value=sdk.SensorStartInfo(25, 8, 2000),
         ))
         async def stop(ring):
@@ -1077,7 +1160,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             async with open_ring_stream("A", on_status=self.status.append):
                 raise asyncio.CancelledError()
-        self.assertEqual(self.order, ["stop", "disconnect"])
+        self.assertEqual(self.order, ["capabilities", "start", "stop", "disconnect"])
 
     async def test_stop_failure_does_not_mask_receive_failure(self):
         self.stop.side_effect = sdk.TimeoutError("stop failed")
@@ -1090,11 +1173,18 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.ring.is_connected)
         self.stop.assert_awaited_once_with(self.ring)
 
-    async def test_busy_guidance_and_no_automatic_mode_switch(self):
-        self.start.side_effect = sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY)
-        with self.assertRaisesRegex(sdk.DeviceError, "key event alone"):
+    async def test_busy_guidance_requests_later_retry_without_mode_switch(self):
+        original = sdk.DeviceError(ErrorCode.DEVICE_BUSY)
+        self.start.side_effect = original
+        with self.assertRaisesRegex(sdk.DeviceError, "Retry later") as caught:
             async with open_ring_stream("A", on_status=self.status.append):
                 self.fail("busy must not yield")
+        self.assertEqual(caught.exception.error_code, ErrorCode.DEVICE_BUSY)
+        self.assertIs(caught.exception.__cause__, original)
+        self.assertNotIn("gesture mode", str(caught.exception))
+        self.assertFalse(any("gesture mode" in text for text in self.status))
+        self.capabilities.assert_awaited_once_with(self.ring)
+        self.start.assert_awaited_once_with(self.ring)
         self.stop.assert_not_awaited()
         self.assertFalse(self.ring.is_connected)
 
@@ -1103,7 +1193,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "sample rate"):
             async with open_ring_stream("A", on_status=self.status.append):
                 self.fail("invalid sample rate")
-        self.assertEqual(self.order, ["stop", "disconnect"])
+        self.assertEqual(self.order, ["capabilities", "start", "stop", "disconnect"])
 
 
 if __name__ == "__main__":

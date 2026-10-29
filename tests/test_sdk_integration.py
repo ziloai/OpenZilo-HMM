@@ -18,6 +18,7 @@ import openzilo as sdk
 import recognize
 import record_gesture
 from ring_stream import open_ring_stream
+from hmm_gesture_studio.wire import ErrorCode
 
 
 def batch(value: int, count: int = 12) -> sdk.SensorDataBatch:
@@ -54,6 +55,9 @@ class StreamTestCase(unittest.IsolatedAsyncioTestCase):
             return_value=sdk.SystemInfo("test-firmware", 0, 0, 0, 80, False,
                                        "test-sn", "test-cpuid", "test-ring"),
         ))
+        self.capabilities = self.stack.enter_context(patch(
+            "ring_stream.sdk.get_device_capabilities", new_callable=AsyncMock,
+        ))
         self.start = self.stack.enter_context(patch(
             "ring_stream.sdk.start_sensor_report", new_callable=AsyncMock,
             return_value=sdk.SensorStartInfo(25, 8, 2000),
@@ -71,20 +75,27 @@ class TestStreamLifecycle(StreamTestCase):
             self.assertEqual(start.sample_rate_hz, 25)
             self.assertTrue(ring.is_connected)
         self.client.assert_called_once_with(address="test-uuid")
+        self.capabilities.assert_awaited_once_with(self.ring)
         self.start.assert_awaited_once_with(self.ring)
         self.stop.assert_awaited_once_with(self.ring)
         self.assertFalse(self.ring.is_connected)
 
-    async def test_busy_is_not_treated_as_a_successful_mode_switch(self):
-        self.start.side_effect = sdk.DeviceError(sdk.ErrorCode.DEVICE_BUSY)
-        with self.assertRaisesRegex(sdk.DeviceError, "gesture mode"):
-            async with open_ring_stream("test-uuid"):
+    async def test_busy_requires_later_retry_not_a_mode_switch(self):
+        self.start.side_effect = sdk.DeviceError(ErrorCode.DEVICE_BUSY)
+        status = []
+        with self.assertRaisesRegex(sdk.DeviceError, "Retry later") as caught:
+            async with open_ring_stream("test-uuid", on_status=status.append):
                 self.fail("A failed start must not yield a stream")
+        self.assertEqual(caught.exception.error_code, ErrorCode.DEVICE_BUSY)
+        self.assertNotIn("gesture mode", str(caught.exception))
+        self.assertFalse(any("gesture mode" in text for text in status))
+        self.capabilities.assert_awaited_once_with(self.ring)
+        self.start.assert_awaited_once_with(self.ring)
         self.stop.assert_not_awaited()
         self.assertFalse(self.ring.is_connected)
 
     async def test_other_device_errors_are_preserved(self):
-        error = sdk.DeviceError(sdk.ErrorCode.CMD_NOT_EXIST)
+        error = sdk.DeviceError(ErrorCode.CMD_NOT_EXIST)
         self.start.side_effect = error
         with self.assertRaises(sdk.DeviceError) as caught:
             async with open_ring_stream("test-uuid"):

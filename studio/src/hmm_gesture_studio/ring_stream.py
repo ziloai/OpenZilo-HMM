@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 
 import openzilo as sdk
 
+from hmm_gesture_studio.wire import ErrorCode
+
 
 @asynccontextmanager
 async def open_ring_stream(
@@ -17,25 +19,23 @@ async def open_ring_stream(
 ) -> AsyncIterator[tuple[sdk.OpenZiloClient, sdk.SensorStartInfo]]:
     """Connect, enable IMU reports, and stop reports before disconnecting.
 
-    The user must put the ring in gesture mode. A key event is not proof of
-    the current mode; only a successful start_sensor_report enables streaming.
+    Discover capabilities before directly subscribing to IMU reports.
+    A busy device can be retried later; no manual mode switch is required.
     """
     on_status(f"Connecting to OpenZilo ring {address} ...")
     async with sdk.OpenZiloClient(address=address) as ring:
         info = await sdk.get_system_info(ring)
         on_status(f"Connected: {info.model} (firmware {info.firmware_version}, "
                   f"battery {info.battery_percent}%)")
-        on_status("The ring must be in gesture mode before starting IMU reports.")
+        await sdk.get_device_capabilities(ring)
         try:
             start = await sdk.start_sensor_report(ring)
         except sdk.DeviceError as exc:
-            if exc.error_code == sdk.ErrorCode.DEVICE_BUSY:
+            if exc.error_code == ErrorCode.DEVICE_BUSY:
                 raise sdk.DeviceError(
                     exc.error_code,
-                    "Cannot start IMU reports: device busy. Finish any active "
-                    "operation, switch the ring to gesture mode with a single "
-                    "button press if needed, then retry. A key event alone "
-                    "does not confirm the mode.",
+                    "Cannot start IMU reports: device busy. Retry later after "
+                    "the active operation finishes.",
                 ) from exc
             raise
 

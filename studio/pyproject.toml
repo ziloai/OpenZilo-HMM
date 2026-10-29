@@ -12,7 +12,7 @@ license = "MPL-2.0"
 license-files = ["LICENSE"]
 dependencies = [
   "hmm-gesture==0.2.0",
-  "OpenZilo @ git+https://github.com/ziloai/OpenZilo.git@e9a861dd5c82a154fba0f1bafb628cd04fbd9555",
+  "OpenZilo[pcm] @ git+https://github.com/ziloai/OpenZilo.git@37928a8a65a4ca98be8b8d2be3300ad7f624004e",
 ]
 
 [project.scripts]

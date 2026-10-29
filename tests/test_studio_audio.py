@@ -58,6 +58,29 @@ class RecordingTests(unittest.TestCase):
             self.assertEqual(result["duration_s"], wav.getnframes() / wav.getframerate())
         self.assertEqual(result["duration_s"], 0.02)
 
+    def test_opus_preserves_mono_and_stereo_and_uses_sdk_timeout(self):
+        for channels, toc in ((1, 0x08), (2, 0x0c)):
+            with self.subTest(channels=channels), patch("shutil.which", return_value="/usr/bin/ffmpeg"):
+                original = sdk.build_opus_recording([bytes([toc]) + b"abc"], channels=channels)
+                self.run.return_value.stdout = b"\0\0" * 320 * channels
+                result = self.save(original)
+                self.assertIsNone(result["warning"])
+                self.assertEqual(Path(result["raw_path"]).read_bytes(), original)
+                with wave.open(result["path"], "rb") as wav:
+                    self.assertEqual(wav.getnchannels(), channels)
+                    self.assertEqual(wav.getframerate(), 16000)
+                    self.assertEqual(wav.getnframes(), 320)
+                self.assertEqual(self.run.call_args.kwargs["timeout"], 30.0)
+
+    def test_opus_decoder_failure_keeps_original(self):
+        original = sdk.build_opus_recording([b"\x0cabc"], channels=2)
+        with patch("shutil.which", return_value=None):
+            result = self.save(original)
+        self.assertEqual(Path(result["raw_path"]).read_bytes(), original)
+        self.assertEqual(result["path"], result["raw_path"])
+        self.assertIsNone(result["duration_s"])
+        self.assertTrue(result["warning"])
+
     def test_raw_exists_before_decoder_runs(self):
         def decode(*args, **kwargs):
             raw_files = list(self.directory.glob("*.bin"))

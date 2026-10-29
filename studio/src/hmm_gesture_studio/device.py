@@ -12,6 +12,7 @@ from weakref import WeakSet
 import openzilo as sdk
 
 from .audio import save_recording
+from .wire import AudioCommand, SensorCommand, ErrorCode
 
 IMU_TIMEOUT = 1.0
 RETRY_DELAY = 1.5
@@ -24,31 +25,25 @@ BATTERY_TIMEOUT = 2.0
 
 
 class _StudioClient(sdk.OpenZiloClient):
-    """Serialize SDK requests and finish fragmented writes before cancelling.
+    """Observe transfers and finish writes before cancelling.
 
-    Separate locks are intentional: request() calls send_command(). Audio and
-    IMU additionally have one business-level owner, including their queue waits.
-    No asynchronous SDK packet handlers (which the SDK does not supervise).
+    SDK 0.6.2 owns write and per-response request locks. Never acquire its write
+    lock here: super().send_command() acquires it internally.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._write_lock = asyncio.Lock()
-        self._request_lock = asyncio.Lock()
         self.audio_observer = None
         self.audio_extract_index = None
 
     async def send_command(self, command, body=b""):
         async def write():
-            async with self._write_lock:
-                try:
-                    await super(_StudioClient, self).send_command(command, body)
-                except sdk.OpenZiloError:
-                    raise
-                except Exception as exc:
-                    # Bleak's platform transport errors are not always wrapped
-                    # by this pinned SDK. Treat failed writes as transport loss.
-                    raise sdk.TransportError(f"BLE command write failed: {exc}") from exc
+            try:
+                await super(_StudioClient, self).send_command(command, body)
+            except sdk.OpenZiloError:
+                raise
+            except Exception as exc:
+                raise sdk.TransportError(f"BLE command write failed: {exc}") from exc
         task = asyncio.create_task(write())
         try:
             await asyncio.shield(task)
@@ -59,19 +54,18 @@ class _StudioClient(sdk.OpenZiloClient):
             raise
 
     async def request(self, command, response_command, body=b"", *, timeout_s=None):
-        async with self._request_lock:
-            if command == sdk.AudioCommand.START_EXTRACT:
-                self.audio_extract_index = int.from_bytes(body[2:6], "little")
-            result = await super().request(
-                command, response_command, body, timeout_s=timeout_s,
-            )
-            if command == sdk.AudioCommand.END_EXTRACT:
-                self.audio_extract_index = None
-            return result
+        if command == AudioCommand.START_EXTRACT:
+            self.audio_extract_index = int.from_bytes(body[2:6], "big")
+        result = await super().request(
+            command, response_command, body, timeout_s=timeout_s,
+        )
+        if command == AudioCommand.END_EXTRACT:
+            self.audio_extract_index = None
+        return result
 
     async def wait_for_command(self, command, *, timeout_s=None):
         packet = await super().wait_for_command(command, timeout_s=timeout_s)
-        if command == sdk.AudioCommand.DATA_FRAME and self.audio_observer:
+        if command == AudioCommand.DATA_FRAME and self.audio_observer:
             self.audio_observer(sdk.parse_audio_data_frame(packet.body))
         return packet
 
@@ -119,6 +113,14 @@ class RingWorker:
         self._stream_state = None
         self._audio_state = None
         self._audio_message = None
+        self._address = None
+        self._tool_kind = None
+        self._tool_pending = None
+        self._tool_task = None
+        self._calibration_continue = None
+        self._recording_stop = None
+        self._firmware_reserved = False
+        self._telemetry_lock = None
 
     def _cancel_task(self, task):
         # Task.cancelling() is Python 3.11+, but Studio also supports 3.10.
@@ -269,7 +271,7 @@ class RingWorker:
             self._emit("error", "Connect a ring before using audio.")
             self._audio("idle", "Not connected.")
             return
-        if self._audio_busy or self._audio_armed:
+        if self._audio_busy or self._audio_armed or self._tool_kind:
             # Manual extraction shares (and can drain) the auto-push queue.
             self._emit("error", "Stop the current audio operation first.")
             return
@@ -281,15 +283,122 @@ class RingWorker:
             # Arming is passive: only queued audio may interrupt the IMU owner.
             self._audio_armed = True
             self._audio_directory = directory
-            self._audio("listening", "Auto reception is on; gesture mode remains available.")
+            self._audio("listening", "Listening for saved recordings; IMU remains available.")
         else:
             self._queue_audio(kind, index, directory)
+
+    def read_recording_config(self):
+        self._control(self._accept_audio, "config", None, None)
+
+    def start_remote_recording(self, options, directory, *, live=False):
+        self._control(self._accept_audio, "live" if live else "record", dict(options), directory)
+
+    def finish_remote_recording(self):
+        self._control(self._finish_recording)
+
+    def _finish_recording(self):
+        if self._recording_stop is not None:
+            self._recording_stop.set()
+
+    def start_calibration(self, mode):
+        self._control(self._accept_tool, "calibrating", mode)
+
+    def continue_calibration(self):
+        self._control(self._continue_calibration)
+
+    def _continue_calibration(self):
+        if self._calibration_continue is not None:
+            self._calibration_continue.set()
+
+    def start_diagnostics(self):
+        self._control(self._accept_tool, "diagnostics", None)
+
+    def show_calibration(self):
+        self._control(self._accept_tool, "profile", None)
+
+    def reset_calibration(self):
+        self._control(self._accept_tool, "reset", None)
+
+    def install_firmware(self, verified):
+        with self._lock:
+            if self._closing or self._disconnecting or self._loop is None:
+                raise RuntimeError("Connect before installing firmware")
+            if self._firmware_reserved:
+                raise RuntimeError("Firmware update is already pending")
+            self._firmware_reserved = True
+            self._loop.call_soon_threadsafe(self._accept_tool, "firmware", verified)
+
+    def stop_tool(self):
+        self._control(self._stop_tool)
+
+    def _accept_tool(self, kind, value):
+        if (self._ring is None or not self._ring.is_connected or self._closing
+                or self._disconnecting or self._audio_busy or self._audio_armed
+                or self._tool_kind):
+            if kind == "firmware":
+                self._firmware_reserved = False
+            self._emit("error", "Connect and stop other audio/device operations first.")
+            if not self._tool_kind:
+                self._emit("tool_state", {"state": "idle", "message": "设备操作未启动"})
+            return
+        self._tool_kind = kind
+        self._tool_pending = (kind, value)
+        self._stream("suspended", "IMU reserved for device tools.")
+        self._emit("tool_state", {"state": kind, "message": "正在准备设备操作"})
+        self._wake.set()
+
+    def _stop_tool(self):
+        if self._tool_kind == "firmware" or self._firmware_reserved:
+            self._emit("warning", "Firmware update must finish or time out before disconnecting.")
+            return
+        if self._tool_task is not None:
+            self._cancel_task(self._tool_task)
+        else:
+            self._tool_pending = None
+            self._tool_kind = None
+            self._emit("tool_state", {"state": "idle", "message": "设备操作已取消"})
+
+    async def _run_tool(self, ring, kind, value):
+        from . import calibration, firmware
+
+        async def prompt(message):
+            self._calibration_continue = asyncio.Event()
+            self._emit("calibration_prompt", message)
+            try:
+                await self._calibration_continue.wait()
+                self._check_interrupted()
+            finally:
+                self._calibration_continue = None
+
+        if kind == "calibrating":
+            await calibration.run_calibration(
+                ring, value, device_id=self._address, prompt=prompt, emit=self._emit,
+            )
+        elif kind == "diagnostics":
+            await calibration.run_diagnostics(ring, device_id=self._address, emit=self._emit)
+        elif kind == "profile":
+            self._emit("calibration_profile", await asyncio.to_thread(calibration.read_profile, self._address))
+        elif kind == "reset":
+            await asyncio.to_thread(calibration.reset_profile, self._address)
+            self._emit("calibration_profile", "本机校准配置已重置；手势数据未改变。")
+        elif kind == "firmware":
+            if ring.capabilities.supports("recording_control"):
+                status = await sdk.get_audio_recording_status(ring)
+                if status.state not in (sdk.AudioRecordingState.IDLE,
+                                        sdk.AudioRecordingState.COMPLETE,
+                                        sdk.AudioRecordingState.FAILED,
+                                        sdk.AudioRecordingState.CANCELLED):
+                    raise ValueError("Stop recording and confirm completion before OTA")
+            await firmware.install_firmware(ring, value, emit=self._emit)
 
     def _queue_audio(self, kind, index, directory):
         self._audio_busy = True
         self._audio_pending = (kind, index, directory)
+        if kind in {"record", "live"}:
+            self._recording_stop = asyncio.Event()
         self._stream("suspended", "IMU paused for audio.")
-        self._audio({"listen": "receiving", "list": "listing", "download": "downloading"}[kind],
+        self._audio({"listen": "receiving", "list": "listing", "download": "downloading",
+                     "config": "listing", "record": "recording", "live": "live"}[kind],
                     "Preparing audio transfer.")
         self._wake.set()
 
@@ -304,6 +413,7 @@ class RingWorker:
         else:
             self._audio_pending = None
             self._audio_busy = False
+            self._recording_stop = None
             self._audio("idle", "Audio reception stopped.")
             self._wake.set()
 
@@ -323,6 +433,11 @@ class RingWorker:
                 try:
                     await ring.connect()
                     info = await sdk.get_system_info(ring)
+                    capabilities = await sdk.get_device_capabilities(ring)
+                    self._address = address
+                    self._emit("capabilities", {name: capabilities.supports(name) for name in (
+                        "audio_files", "recording_control", "live_audio", "imu", "ota",
+                    )})
                     connected_once = True
                     attempt = 0
                     self._emit("connected", {
@@ -357,6 +472,7 @@ class RingWorker:
 
     async def _session(self, ring):
         self._ring = ring
+        self._telemetry_lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._retry_requested = False
         self._audio("idle", "Audio reception is off.")
@@ -379,6 +495,13 @@ class RingWorker:
             self._audio_pending = None
             self._audio_task = None
             self._audio_busy = False
+            self._tool_pending = None
+            self._tool_task = None
+            self._tool_kind = None
+            self._recording_stop = None
+            self._firmware_reserved = False
+            self._calibration_continue = None
+            self._emit("tool_state", {"state": "idle", "message": "设备操作已结束"})
             self._wake = None
             self._audio("idle", "Audio reception is off.")
             self._stream("suspended", "BLE session ended.")
@@ -394,10 +517,13 @@ class RingWorker:
             # Initial battery info was already included in the connected event.
             await asyncio.sleep(BATTERY_REFRESH_INTERVAL)
             self._check_interrupted()
-            if not ring.is_connected or self._audio_busy:
+            if not ring.is_connected or self._audio_busy or self._tool_kind:
                 continue
             try:
-                info = await sdk.get_system_info(ring, timeout_s=BATTERY_TIMEOUT)
+                async with self._telemetry_lock:
+                    if self._tool_kind:
+                        continue
+                    info = await sdk.get_system_info(ring, timeout_s=BATTERY_TIMEOUT)
             except sdk.OpenZiloError as exc:
                 self._emit("battery", _battery_status(None))
                 self._emit("warning", f"电量读取失败，将于下次刷新重试：{exc}")
@@ -408,8 +534,15 @@ class RingWorker:
     async def _housekeeping(self, ring):
         while True:
             self._check_interrupted()
+            if self._tool_kind == "firmware":
+                # OTA owns reconnect/version verification as well as transmission.
+                await asyncio.sleep(HOUSEKEEPING_INTERVAL)
+                continue
             if not ring.is_connected:
                 raise sdk.TransportError("BLE connection lost")
+            if self._tool_kind:
+                await asyncio.sleep(HOUSEKEEPING_INTERVAL)
+                continue
             # The SDK queues every notification even without a subscription.
             # These fixed-version event queues have no other Studio consumer.
             key_queue = ring._queues.get(0x0704)
@@ -421,13 +554,17 @@ class RingWorker:
                 if self._audio_armed:
                     # Peek only. The owner must stop IMU before the SDK receiver
                     # runs: gap recovery can send extraction commands.
-                    audio_queue = ring._queues.get(int(sdk.AudioCommand.DATA_FRAME))
-                    if audio_queue is not None and not audio_queue.empty():
+                    pending = any(
+                        (q := ring._queues.get(int(command))) is not None and not q.empty()
+                        for command in (AudioCommand.RECORD_RESULT, AudioCommand.DATA_FRAME)
+                    )
+                    if pending:
                         self._queue_audio("listen", None, self._audio_directory)
                 else:
-                    _drain(ring, sdk.AudioCommand.DATA_FRAME)
+                    _drain(ring, AudioCommand.DATA_FRAME)
+                    _drain(ring, AudioCommand.RECORD_RESULT)
             if self._audio_task is not None:
-                _drain(ring, sdk.SensorCommand.DATA_FRAME)
+                _drain(ring, SensorCommand.DATA_FRAME)
             await asyncio.sleep(HOUSEKEEPING_INTERVAL)
 
     async def _pause(self):
@@ -449,12 +586,46 @@ class RingWorker:
         started = False
         info = None
         sequence = timestamp = None
-        self._stream("waiting", "Waiting for fresh IMU data; select gesture mode on the ring.")
+        self._stream("waiting", "Subscribing to IMU; waiting for fresh data.")
         try:
             while True:
                 self._check_interrupted()
                 if not ring.is_connected:
                     raise sdk.TransportError("BLE connection lost")
+                if self._tool_pending is not None:
+                    operation = self._tool_pending
+                    kind, value = operation
+                    try:
+                        # Wait for any already-started telemetry before exclusive use.
+                        async with self._telemetry_lock:
+                            if started:
+                                await sdk.stop_sensor_report(ring, timeout_s=CLEANUP_TIMEOUT)
+                                started = False
+                            info = None
+                            sequence = timestamp = None
+                            if self._tool_pending is not operation:
+                                continue
+                            self._tool_pending = None
+                            self._tool_task = asyncio.create_task(self._run_tool(ring, kind, value))
+                            try:
+                                await asyncio.shield(self._tool_task)
+                            except asyncio.CancelledError:
+                                if asyncio.current_task() in self._cancelled_tasks:
+                                    self._cancel_task(self._tool_task)
+                                    await asyncio.gather(self._tool_task, return_exceptions=True)
+                                    raise
+                    except Exception as exc:
+                        self._emit("error", f"Device operation failed: {exc}")
+                    finally:
+                        self._tool_task = None
+                        self._tool_pending = None
+                        # Keep OTA reservation through final disconnect.
+                        if kind != "firmware":
+                            self._tool_kind = None
+                            self._emit("tool_state", {"state": "idle", "message": "设备操作已结束"})
+                    if kind == "firmware":
+                        return  # No blind retries after an OTA attempt; reconnect explicitly.
+                    continue
                 if self._audio_pending is not None:
                     operation = self._audio_pending
                     if started:
@@ -481,10 +652,10 @@ class RingWorker:
                         self._audio_task = None
                         self._audio_busy = False
                         if self._audio_armed:
-                            self._audio("listening", "Auto reception is on; gesture mode remains available.")
+                            self._audio("listening", "Listening for saved recordings; IMU remains available.")
                         else:
                             self._audio("idle", "Audio reception is off.")
-                    self._stream("waiting", "Resuming IMU; select gesture mode on the ring.")
+                    self._stream("waiting", "Resuming IMU subscription.")
                     continue
                 if self._retry_requested:
                     self._retry_requested = False
@@ -492,17 +663,17 @@ class RingWorker:
                 if info is None:
                     if self._stream_state == "active":
                         self._stream("waiting", "Restarting IMU; waiting for fresh data.")
-                    _drain(ring, sdk.SensorCommand.DATA_FRAME)
+                    _drain(ring, SensorCommand.DATA_FRAME)
                     sequence = timestamp = None
                     try:
                         # Timeout may mean a lost ACK, so cleanup must still stop.
                         started = True
                         info = await sdk.start_sensor_report(ring, timeout_s=IMU_TIMEOUT)
                     except sdk.DeviceError as exc:
-                        if exc.error_code != sdk.ErrorCode.DEVICE_BUSY:
+                        if exc.error_code != ErrorCode.DEVICE_BUSY:
                             raise
                         info = None
-                        self._stream("suspended", "Ring busy; finish recording and select gesture mode.")
+                        self._stream("suspended", "Ring busy; waiting to retry IMU subscription.")
                         await self._pause()
                         continue
                     except sdk.TimeoutError:
@@ -515,7 +686,7 @@ class RingWorker:
                     # Also discard batches queued while START was awaiting its
                     # ACK. The next nonempty batch, not buffered pre-ACK data,
                     # establishes readiness (dropping an early fresh batch is safe).
-                    _drain(ring, sdk.SensorCommand.DATA_FRAME)
+                    _drain(ring, SensorCommand.DATA_FRAME)
                     if not self._audio_busy:
                         self._stream("waiting", "IMU start acknowledged; waiting for fresh data.")
                     if self._audio_busy:
@@ -527,7 +698,7 @@ class RingWorker:
                     self._stream("suspended", "IMU stopped reporting; probing again shortly.")
                     await self._pause()
                     continue
-                if self._audio_busy or not batch.samples:
+                if self._audio_busy or self._tool_kind or not batch.samples:
                     await asyncio.sleep(0)
                     continue
                 samples = batch.samples
@@ -599,7 +770,24 @@ class RingWorker:
             self._emit("audio_progress", {"bytes": received, "total": None})
 
         try:
-            if kind == "list":
+            if kind in {"record", "live", "config"}:
+                from . import remote_audio
+                if kind == "config":
+                    await remote_audio.read_config(ring, self._emit)
+                else:
+                    if self._recording_stop is None:
+                        self._recording_stop = asyncio.Event()
+                    try:
+                        await remote_audio.record(
+                            ring, index, live=kind == "live", stop=self._recording_stop,
+                            emit=self._emit,
+                            save=lambda data, file_index, metadata: self._save(
+                                data, file_index, directory, metadata,
+                            ),
+                        )
+                    finally:
+                        self._recording_stop = None
+            elif kind == "list":
                 count = await sdk.get_audio_file_count(ring, timeout_s=AUDIO_TIMEOUT)
                 if type(count) is not int or not 0 <= count <= 10000:
                     raise ValueError(f"Unexpected recording count: {count}; refusing to build an unbounded list")
@@ -635,7 +823,8 @@ class RingWorker:
                 if ring.audio_extract_index is not None:
                     await self._end_extract(ring, ring.audio_extract_index)
                     ring.audio_extract_index = None
-        except (sdk.TimeoutError, sdk.ProtocolError, sdk.DeviceError, OSError, ValueError, TypeError) as exc:
+        except (sdk.TimeoutError, sdk.ProtocolError, sdk.DeviceError, sdk.CompatibilityError,
+                sdk.AudioDecodeError, OSError, ValueError, TypeError) as exc:
             # File/decoder/configuration errors end only the audio operation;
             # they must not tear down a healthy BLE connection.
             self._emit("error", f"Audio failed: {exc}. Recover incomplete files by index from ring history.")
@@ -665,6 +854,8 @@ class RingWorker:
 
     def disconnect(self) -> None:
         with self._lock:
+            if self._firmware_reserved or self._tool_kind == "firmware":
+                raise RuntimeError("Wait for firmware update completion before disconnecting")
             if not self._closing and self._busy == "connect":
                 self._disconnecting = True
                 self._loop.call_soon_threadsafe(self._cancel)
@@ -679,6 +870,8 @@ class RingWorker:
 
     def close(self) -> Future:
         with self._lock:
+            if self._firmware_reserved or self._tool_kind == "firmware":
+                raise RuntimeError("Wait for firmware update completion before closing")
             if not self._closing:
                 self._closing = True
                 if self._thread is None:
