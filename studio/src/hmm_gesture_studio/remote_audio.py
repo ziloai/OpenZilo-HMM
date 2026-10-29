@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""One remote recording on an already connected ring; no GUI, playback or files.
+"""One remote recording on an already connected ring; no GUI or file ownership.
 
 ``emit(name, payload)`` is synchronous and must return promptly. ``save`` is an
 async callback accepting (complete_bytes, file_index, metadata); the worker owns
@@ -170,7 +170,19 @@ class _Session:
             await _cancel_join([finished, requested])
 
 
-async def _collect_pcm(stream: Any, emit: Emit) -> tuple[bytes, Any, Any]:
+async def _collect_pcm(stream: Any, emit: Emit, *, playback: bool = False) -> tuple[bytes, Any, Any]:
+    monitor = None
+    if playback:
+        from .playback import PcmPlayback
+        monitor = PcmPlayback(emit)
+    try:
+        return await _receive_pcm(stream, emit, monitor)
+    finally:
+        if monitor is not None:
+            await _best_effort(asyncio.to_thread(monitor.close))
+
+
+async def _receive_pcm(stream: Any, emit: Emit, monitor: Any) -> tuple[bytes, Any, Any]:
     start = None
     end = None
     pcm = bytearray()
@@ -187,6 +199,8 @@ async def _collect_pcm(stream: Any, emit: Emit) -> tuple[bytes, Any, Any]:
                 raise sdk.ProtocolError("Invalid live START format")
             start = event
             config = sdk.PcmConfig(event.sample_rate, event.channels, 16)
+            if monitor is not None:
+                monitor.start(config)
         elif isinstance(event, sdk.LivePcmFrame):
             if (start is None or event.session_id != start.session_id or event.pcm_config != config
                     or event.sample_offset != samples or event.sample_count != 320
@@ -196,6 +210,8 @@ async def _collect_pcm(stream: Any, emit: Emit) -> tuple[bytes, Any, Any]:
             samples += event.sample_count
             if samples > 16000 * 60:
                 raise sdk.ProtocolError("Live PCM exceeds the recording limit")
+            if monitor is not None:
+                monitor.feed(event.data)
             if loop.time() - last_progress >= _PROGRESS_INTERVAL:
                 emit("audio_progress", {"bytes": len(pcm), "total": None})
                 last_progress = loop.time()
@@ -215,13 +231,13 @@ async def _collect_pcm(stream: Any, emit: Emit) -> tuple[bytes, Any, Any]:
 
 
 async def _capture(session: _Session, config: Any, stop: asyncio.Event, emit: Emit,
-                   stream: Any = None) -> tuple[Any, Any]:
+                   stream: Any = None, *, playback: bool = False) -> tuple[Any, Any]:
     tasks = []
     collector = None
     try:
         if stream is not None:
             # Drain while START ACK is pending, including lost-ACK recovery.
-            collector = asyncio.create_task(_collect_pcm(stream, emit))
+            collector = asyncio.create_task(_collect_pcm(stream, emit, playback=playback))
             tasks.append(collector)
         await _command(session.start())
         _report_active(emit, live=stream is not None)
@@ -261,7 +277,7 @@ async def _download(ring: Any, index: int, emit: Emit) -> tuple[Any, bytes]:
 
 
 async def record(ring: Any, options: dict, *, live: bool, stop: asyncio.Event,
-                 emit: Emit, save: Save) -> None:
+                 emit: Emit, save: Save, playback: bool = False) -> None:
     """Record FLASH or LIVE_AND_FLASH, then hand only confirmed audio to save.
 
     Options are the five mutable SDK recording fields. Output and disconnect
@@ -285,7 +301,7 @@ async def record(ring: Any, options: dict, *, live: bool, stop: asyncio.Event,
     session = _Session(ring, previous, emit)
     if live:
         async with sdk.open_live_audio_stream(ring, output="pcm") as stream:
-            status, recording = await _capture(session, config, stop, emit, stream)
+            status, recording = await _capture(session, config, stop, emit, stream, playback=playback)
         pcm, pcm_config, start = recording
         data = sdk.build_wav_from_pcm(pcm, pcm_config)
         metadata = {"record_time": start.record_time, "session_id": session.id,

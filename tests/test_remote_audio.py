@@ -7,7 +7,7 @@ from contextlib import ExitStack
 import io
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import wave
 
 import openzilo as sdk
@@ -109,9 +109,9 @@ class RemoteAudioTests(unittest.IsolatedAsyncioTestCase):
         self.wav_builder = self.stack.enter_context(patch.object(
             sdk, "build_wav_from_pcm", wraps=sdk.build_wav_from_pcm))
 
-    async def run_record(self, *, live=False, options=None):
+    async def run_record(self, *, live=False, options=None, playback=False):
         await remote_audio.record(self.ring, options or {}, live=live, stop=self.stop,
-                                  emit=self.emit, save=self.save)
+                                  emit=self.emit, save=self.save, playback=playback)
 
     async def held_finish(self, *args, **kwargs):
         self.waiting.set()
@@ -220,6 +220,106 @@ class RemoteAudioTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(wav.readframes(wav.getnframes()), pcm)
         self.download.assert_not_awaited()
         self.assertEqual(self.wav_builder.call_count, 2)
+
+    async def test_playback_is_opt_in_and_never_used_for_flash(self):
+        with patch('hmm_gesture_studio.playback.PcmPlayback') as player:
+            self.stream()
+            await self.run_record(live=True)
+            await self.run_record(playback=True)
+        player.assert_not_called()
+
+    async def test_playback_gets_validated_frames_before_save_and_closes(self):
+        for channels in (1, 2):
+            with self.subTest(channels=channels):
+                stream, pcm = self.stream(channels, frames=3)
+                self.save.reset_mock()
+                monitor = Mock()
+                def feed(data):
+                    self.save.assert_not_awaited()
+                    self.assertNotIn('live_end', self.trace)
+                monitor.feed.side_effect = feed
+                self.trace.clear()
+                with patch('hmm_gesture_studio.playback.PcmPlayback', return_value=monitor):
+                    await self.run_record(live=True, playback=True)
+                monitor.start.assert_called_once_with(sdk.PcmConfig(16000, channels, 16))
+                self.assertEqual(b''.join(call.args[0] for call in monitor.feed.call_args_list), pcm)
+                monitor.close.assert_called_once()
+                self.assertTrue(stream.closed)
+                data = self.save.call_args.args[0]
+                with wave.open(io.BytesIO(data)) as wav:
+                    self.assertEqual(wav.readframes(wav.getnframes()), pcm)
+
+    async def test_output_device_failure_warns_but_still_saves_complete_wav(self):
+        import sys
+        stream, pcm = self.stream()
+        warned = asyncio.Event()
+        stream.events.insert(-1, warned)
+        loop = asyncio.get_running_loop()
+        def emit(event, payload):
+            self.events.append((event, payload))
+            if event == 'warning':
+                loop.call_soon_threadsafe(warned.set)
+        self.emit = emit
+        backend = SimpleNamespace(RawOutputStream=Mock(side_effect=OSError('no output device')))
+        with patch.dict(sys.modules, sounddevice=backend):
+            await asyncio.wait_for(self.run_record(live=True, playback=True), 2)
+        warnings = [payload for event, payload in self.events if event == 'warning']
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('no output device', warnings[0])
+        with wave.open(io.BytesIO(self.save.call_args.args[0])) as wav:
+            self.assertEqual(wav.readframes(wav.getnframes()), pcm)
+
+    async def test_playback_does_not_receive_invalid_frame_or_allow_partial_save(self):
+        stream, _ = self.stream()
+        stream.events[1] = sdk.LivePcmFrame(41, 999, 320, b'bad', sdk.PcmConfig(16000, 2, 16))
+        with patch('hmm_gesture_studio.playback.PcmPlayback') as player:
+            with self.assertRaises(sdk.ProtocolError):
+                await self.run_record(live=True, playback=True)
+        player.return_value.feed.assert_not_called()
+        player.return_value.close.assert_called_once()
+        self.save.assert_not_awaited()
+
+    async def test_playback_closes_on_disconnect_and_invalid_end(self):
+        for failure in (sdk.TransportError('disconnected'), sdk.LiveAudioEnd(0, 41, 10, 9, 0)):
+            with self.subTest(failure=failure):
+                stream, _ = self.stream()
+                stream.events[-1] = failure
+                with patch('hmm_gesture_studio.playback.PcmPlayback') as player:
+                    with self.assertRaises((sdk.ProtocolError, sdk.TransportError)):
+                        await self.run_record(live=True, playback=True)
+                player.return_value.close.assert_called_once()
+                self.assertTrue(stream.closed)
+        self.save.assert_not_awaited()
+
+    async def test_playback_cancel_waits_for_close_even_with_repeated_cancel(self):
+        import threading
+        stream, _ = self.stream(end=False)
+        stream.events.append(asyncio.Event())
+        self.query.side_effect = [IDLE, ACTIVE]
+        self.wait_finished.side_effect = self.held_finish
+        closing = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        def close():
+            loop.call_soon_threadsafe(closing.set)
+            if not release.wait(3):
+                raise RuntimeError('test cleanup was not released')
+        with patch('hmm_gesture_studio.playback.PcmPlayback') as player:
+            player.return_value.close.side_effect = close
+            task = asyncio.create_task(self.run_record(live=True, playback=True))
+            try:
+                await self.waiting.wait()
+                task.cancel()
+                await asyncio.wait_for(closing.wait(), 1)
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        self.assertTrue(stream.closed)
+        self.save.assert_not_awaited()
 
     async def test_live_stop_still_requires_end_and_saved_status(self):
         stream, _ = self.stream()
