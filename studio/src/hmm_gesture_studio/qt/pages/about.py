@@ -169,7 +169,6 @@ class AboutPage(Page):
         card.add(self.message)
         self.grid = ContributorGrid()
         card.add(self.grid)
-        card.add(label("打开本页时从 GitHub 获取公开信息，不发送设备或手势数据。", "caption", wrap=True))
         self.finish()
         self.fetcher.loaded.connect(self._loaded)
         self.fetcher.failed.connect(self._failed)

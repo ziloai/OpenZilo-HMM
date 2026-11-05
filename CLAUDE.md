@@ -65,6 +65,7 @@ uv run --locked --all-packages python -m unittest discover -s tests -v
 | 分区背景 | 白色与 `#f5f5f7` 通栏交替 | 全部白色，不用灰色通栏（实际观感突兀）；卡片为白底加 1px `#e6e6e8` 细线 |
 | 主角 | 产品图 | 实时图表和识别结果；关键数值用 `StatTile` |
 | 控件高度 | 紧凑 | 30px（QSS 圆角不能超过高度一半，否则失效；QSS 的 `min/max-height` 会覆盖 `setFixedSize`，按钮尺寸要写在样式表里） |
+| 标题栏 | — | macOS 上融合进窗口（`ExpandedClientAreaHint` + `NoTitleBarBackgroundHint`，要求 Qt ≥ 6.9）：侧边栏背景通到顶，内容避开系统上报的安全区；其他系统保持原生标题栏 |
 | 主题 | 浅色 | 只有浅色，不跟随系统深色模式 |
 | 字体 | SF Pro | 系统字体回退链（`theme.FONT_FAMILIES`）。SF Pro 不能随包分发，不打包字体 |
 

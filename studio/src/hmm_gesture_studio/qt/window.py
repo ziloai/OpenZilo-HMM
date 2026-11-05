@@ -2,6 +2,8 @@
 """Main window: sidebar, pages, and a collapsible log."""
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, QSize, Qt, QVariantAnimation
 from PySide6.QtGui import QColor, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
@@ -27,6 +29,8 @@ NAV = (("capture", "采集"), ("train", "训练"), ("live", "实时"), ("diagnos
        ("audio", "录音"), ("tools", "设备工具"))
 LOG_LINES = 1500
 LOG_HEIGHT = 240
+SIDEBAR_TOP = 20
+SIDEBAR_TOP_MERGED = 6
 
 
 class DeviceCard(QPushButton):
@@ -197,10 +201,38 @@ class LogBar(QWidget):
             self.view.hide()
 
 
-class MainWindow(QMainWindow):
-    def __init__(self, *, controller=None):
+class TitleBarArea(QWidget):
+    """Blank strip under a merged title bar, which still moves the window.
+
+    If the platform handles the title bar itself, these events never arrive.
+    """
+
+    def __init__(self):
         super().__init__()
-        self.setWindowTitle("OpenZilo 手势与录音工作室")
+        self.hide()
+
+    def mousePressEvent(self, event):
+        handle = self.window().windowHandle()
+        if event.button() == Qt.MouseButton.LeftButton and handle is not None:
+            handle.startSystemMove()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        window = self.window()
+        window.showNormal() if window.isMaximized() else window.showMaximized()
+        event.accept()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, *, controller=None, merge_title_bar=None):
+        super().__init__()
+        self._merge_title_bar = sys.platform == "darwin" if merge_title_bar is None else merge_title_bar
+        self._safe_area_window = None
+        # A merged title bar has nothing to label; the app name still identifies the window.
+        self.setWindowTitle("" if self._merge_title_bar else "OpenZilo 手势与录音工作室")
+        if self._merge_title_bar:
+            self.setWindowFlag(Qt.WindowType.ExpandedClientAreaHint)
+            self.setWindowFlag(Qt.WindowType.NoTitleBarBackgroundHint)
         self.resize(1280, 860)
         self.setMinimumSize(1100, 720)
         self.controller = controller or StudioController(QtDialogs(self))
@@ -211,6 +243,9 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("canvas")
         self.setCentralWidget(root)
+        # Layout below the title bar is explicit (set_title_bar_inset), so backgrounds
+        # reach the top edge and Qt's automatic insets cannot add a second gap.
+        self._no_automatic_inset = [self, root]
         outer = QHBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -218,12 +253,16 @@ class MainWindow(QMainWindow):
         right = QVBoxLayout()
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(0)
+        self.content_title_area = TitleBarArea()
+        right.addWidget(self.content_title_area)
         self.stack = QStackedWidget()
         self._fade = CrossFade(self.stack)
         right.addWidget(self.stack, 1)
         self.log_bar = LogBar()
         right.addWidget(self.log_bar)
         outer.addLayout(right, 1)
+        for widget in (*self._no_automatic_inset, self.sidebar, self.sidebar_title_area, self.content_title_area):
+            widget.setAttribute(Qt.WidgetAttribute.WA_ContentsMarginsRespectsSafeArea, False)
         self.pages = {}
         for name, page_class in (("capture", CapturePage), ("train", TrainPage), ("live", LivePage),
                                  ("diagnostics", DiagnosticsPage), ("audio", AudioPage), ("tools", ToolsPage),
@@ -241,12 +280,16 @@ class MainWindow(QMainWindow):
 
     def _build_sidebar(self):
         sidebar = QWidget()
+        self.sidebar = sidebar
         sidebar.setObjectName("sidebar")
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setFixedWidth(208)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 20, 12, 12)
+        layout.setContentsMargins(12, SIDEBAR_TOP, 12, 12)
         layout.setSpacing(2)
+        self._sidebar_layout = layout
+        self.sidebar_title_area = TitleBarArea()
+        layout.addWidget(self.sidebar_title_area)
         self.nav_indicator = QFrame(sidebar)
         self.nav_indicator.setObjectName("navIndicator")
         self.nav_indicator.lower()
@@ -292,8 +335,27 @@ class MainWindow(QMainWindow):
             self.nav_indicator.setGeometry(target)
             self.nav_indicator.show()
 
+    def set_title_bar_inset(self, inset):
+        """Reserve the title bar's height; zero when it is not merged, as in full screen."""
+        for area in (self.sidebar_title_area, self.content_title_area):
+            area.setFixedHeight(max(0, inset))
+            area.setVisible(inset > 0)
+        self._sidebar_layout.setContentsMargins(12, SIDEBAR_TOP_MERGED if inset > 0 else SIDEBAR_TOP, 12, 12)
+        self._sidebar_layout.activate()
+        self.layout().activate()
+        self._place_nav_indicator(animate=False)
+
+    def _watch_safe_area(self):
+        handle = self.windowHandle()
+        if not self._merge_title_bar or handle is None or handle is self._safe_area_window:
+            return
+        self._safe_area_window = handle
+        handle.safeAreaMarginsChanged.connect(lambda margins: self.set_title_bar_inset(margins.top()))
+        self.set_title_bar_inset(handle.safeAreaMargins().top())
+
     def showEvent(self, event):
         super().showEvent(event)
+        self._watch_safe_area()
         self.layout().activate()
         self._place_nav_indicator(animate=False)
 
