@@ -10,10 +10,10 @@ from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
-    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-    from PySide6.QtGui import QCloseEvent, QMouseEvent
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QVariantAnimation
+    from PySide6.QtGui import QCloseEvent, QKeySequence, QMouseEvent
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QWidget
 except ImportError as exc:  # Headless Linux without libEGL/libGL; CI installs them.
     raise unittest.SkipTest(f"Qt GUI libraries unavailable: {exc}")
 
@@ -22,9 +22,12 @@ import numpy as np
 from hmm_gesture_studio.datasets import GestureDataset, load_dataset, save_dataset
 from hmm_gesture_studio.device_history import DeviceHistory
 from hmm_gesture_studio.qt.controller import StudioController
+from hmm_gesture_studio.qt import theme
+from hmm_gesture_studio.qt.charts import LiveImuChart
+from hmm_gesture_studio.qt.motion import CrossFade
 from hmm_gesture_studio.qt.theme import apply_theme
 from hmm_gesture_studio.qt.widgets import Switch
-from hmm_gesture_studio.qt.window import MainWindow, NAV
+from hmm_gesture_studio.qt.window import LOG_HEIGHT, MainWindow, NAV
 
 CAPABILITIES = dict(recording_control=True, live_audio=True, audio_files=True, imu=True, ota=True)
 ACTIVE = dict(state="active", message="IMU 正常上报", sample_rate_hz=25.0, accel_range_g=8, gyro_range_dps=2000)
@@ -106,13 +109,17 @@ class WindowTests(unittest.TestCase):
         page.record.click()
         self.assertEqual(page.record.text(), "停止并保留本次")
         self.assertEqual(page.record.property("kind"), "record")
-        self.assertEqual(page.chart_stack.currentIndex(), 0)
+        self.assertTrue(page.pulse.isVisible())
+        self.assertTrue(page.pulse.animating)
         self.c.handle("samples", [[i, 2, 3, 4, 5, 6] for i in range(20)])
         self.pump()
         self.assertIn("正在录制：20 样本", page.takes.text())
+        self.assertEqual(len(page.chart.accel.curves[0].getData()[0] or ()), 0, "no live waveform while recording")
         page.record.click()
         self.pump()
-        self.assertEqual(page.chart_stack.currentIndex(), 1, "stopping reveals the waveform")
+        self.assertFalse(page.pulse.isVisible())
+        self.assertFalse(page.pulse.animating)
+        self.assertEqual(len(page.chart.accel.curves[0].getData()[0]), 20, "stopping shows the waveform")
         self.assertEqual(page.choice.count(), 1)
         self.assertFalse(page.name.isEnabled())
         self.assertTrue(page.save.isEnabled())
@@ -147,12 +154,12 @@ class WindowTests(unittest.TestCase):
         page = self.win.pages["capture"]
         page.table.selectRow(0)
         self.pump()
-        self.assertEqual(page.chart_stack.currentIndex(), 1)
+        self.assertEqual(len(page.chart.accel.curves[0].getData()[0]), 40)
         return path, page
 
     def test_mouse_drag_saves_region_replaces_it_and_restores_automatic(self):
         path, page = self.saved_preview()
-        panel = page.wave_chart.accel
+        panel = page.chart.accel
         self.drag_chart(panel, 0.1, 0.6)
         self.assertIsNone(load_dataset(path).training_regions, "no selection without selection mode")
         QTest.mouseClick(page.selecting, Qt.MouseButton.LeftButton)
@@ -163,7 +170,7 @@ class WindowTests(unittest.TestCase):
         self.assertAlmostEqual(first[1], 24, delta=2)
         self.assertTrue(page.reset_crop.isEnabled())
         # A second drag over the existing box replaces it: region items must not swallow it.
-        self.drag_chart(page.wave_chart.gyro, 0.3, 0.9)
+        self.drag_chart(page.chart.gyro, 0.3, 0.9)
         second = load_dataset(path).training_regions[1]
         self.assertAlmostEqual(second[0], 12, delta=2)
         self.assertAlmostEqual(second[1], 36, delta=2)
@@ -176,9 +183,9 @@ class WindowTests(unittest.TestCase):
     def test_drag_released_outside_chart_or_too_short_changes_nothing(self):
         path, page = self.saved_preview()
         QTest.mouseClick(page.selecting, Qt.MouseButton.LeftButton)
-        self.drag_chart(page.wave_chart.accel, 0.1, 0.6, leave=True)
+        self.drag_chart(page.chart.accel, 0.1, 0.6, leave=True)
         self.assertIsNone(load_dataset(path).training_regions)
-        self.drag_chart(page.wave_chart.accel, 0.4, 0.42)
+        self.drag_chart(page.chart.accel, 0.4, 0.42)
         self.assertIsNone(load_dataset(path).training_regions)
         self.assertIn("过短", self.dialogs.error.call_args.args[1])
 
@@ -310,13 +317,169 @@ class WindowTests(unittest.TestCase):
                                                max_duration_ms=1000))
         self.assertEqual(page.inputs["bitrate"].text(), "8000")
 
-    def test_log_bar_shows_latest_line_and_expands(self):
+    def test_log_is_a_list_with_levels_and_expands_with_motion(self):
+        bar = self.win.log_bar
         self.c.log("新消息")
-        self.assertIn("新消息", self.win.log_bar.latest.text())
-        self.assertFalse(self.win.log_bar.view.isVisible())
-        self.win.log_bar.toggle.click()
-        self.assertTrue(self.win.log_bar.view.isVisible())
-        self.assertIn("新消息", self.win.log_bar.view.toPlainText())
+        self.assertIn("新消息", bar.latest.text())
+        self.assertFalse(bar.view.isVisible())
+        bar.toggle.click()
+        self.assertTrue(bar.view.isVisible())
+        self.assertLess(bar.view.height(), LOG_HEIGHT, "starts opening rather than jumping")
+        QTest.qWait(theme.MOTION + 80)
+        self.assertEqual(bar.view.height(), LOG_HEIGHT)
+        self.c.handle("warning", "注意")
+        self.c.error("出错了\n第二行")
+        self.assertEqual([entry[1:] for entry in bar.view.entries()[-3:]],
+                         [("info", "新消息"), ("warning", "警告：注意"), ("error", "错误：出错了\n第二行")])
+        self.assertEqual(bar.latest.property("tone"), "critical")
+        self.assertIn("错误：出错了", bar.latest.text())
+        self.assertNotIn("第二行", bar.latest.text())
+        last = bar.view.item(bar.view.count() - 1)
+        self.assertGreater(bar.view.visualItemRect(last).height(), bar.view.visualItemRect(bar.view.item(0)).height(),
+                           "multi-line messages get a taller row")
+        bar.view.setCurrentItem(last)
+        QTest.keySequence(bar.view, QKeySequence(QKeySequence.StandardKey.Copy))
+        self.assertIn("错误：出错了", QApplication.clipboard().text())
+        bar.toggle.click()
+        QTest.qWait(theme.MOTION + 80)
+        self.assertFalse(bar.view.isVisible())
+
+    def test_opening_log_shows_newest_message(self):
+        bar = self.win.log_bar
+        for index in range(60):
+            self.c.log(f"行 {index}")
+        bar.toggle.click()
+        QTest.qWait(theme.MOTION + 80)
+        scroll = bar.view.verticalScrollBar()
+        self.assertGreater(scroll.maximum(), 0)
+        self.assertEqual(scroll.value(), scroll.maximum())
+
+    def test_log_keeps_position_when_reader_scrolled_up_and_is_bounded(self):
+        bar = self.win.log_bar
+        bar.toggle.click()
+        QTest.qWait(theme.MOTION + 80)
+        for index in range(60):
+            self.c.log(f"行 {index}")
+        self.qt.processEvents()
+        scroll = bar.view.verticalScrollBar()
+        self.assertEqual(scroll.value(), scroll.maximum())
+        scroll.setValue(0)
+        self.c.log("更新的一行")
+        self.qt.processEvents()
+        self.assertEqual(scroll.value(), 0)
+
+    def test_capture_page_has_no_live_waveform(self):
+        page = self.win.pages["capture"]
+        self.pump()
+        panel = page.chart.gyro
+        bottom = panel.mapTo(page.widget(), panel.rect().bottomLeft()).y()
+        self.assertLessEqual(bottom, page.viewport().height(), "both panels fit without scrolling")
+        self.assertEqual(page.findChildren(LiveImuChart), [])
+        self.assertEqual(len(self.win.pages["live"].findChildren(LiveImuChart)), 1)
+
+    def test_no_page_uses_a_gray_band_and_cards_have_hairlines(self):
+        for name, page in self.win.pages.items():
+            self.assertEqual(page.findChildren(QWidget, "band"), [], name)
+        self.assertIn(f"border: 1px solid {theme.CONTROL_GRAY}; border-radius: 28px", theme.STYLESHEET)
+
+    def test_ota_inputs_and_buttons_share_a_row_and_height(self):
+        self.win.navigate("tools")
+        page = self.win.pages["tools"]
+        self.pump()
+        for entry, choose in ((page.zip, page.zip_choose), (page.key, page.key_choose)):
+            entry_center = entry.mapToGlobal(entry.rect().center()).y()
+            self.assertEqual(entry_center, choose.mapToGlobal(choose.rect().center()).y())
+            self.assertEqual(entry.height(), choose.height())
+
+    def test_filled_and_outlined_buttons_have_equal_height(self):
+        page = self.win.pages["train"]
+        self.win.navigate("train")
+        self.pump()
+        self.assertEqual(page.train.height(), page.evaluate.height())
+
+    def test_scan_shows_progress_until_worker_reports_the_end(self):
+        self.win.navigate("device")
+        self.pump()
+        page = self.win.pages["device"]
+        self.assertFalse(page.scanning.isVisible())
+        page.scan.click()
+        self.pump()
+        self.worker.scan.assert_called_once()
+        self.assertTrue(page.scanning.isVisible())
+        self.assertTrue(page.scanning.spinner.animating)
+        self.assertEqual(page.scan.text(), "扫描中…")
+        self.assertFalse(page.scan.isEnabled())
+        self.assertFalse(page.connect_button.isEnabled())
+        self.c.handle("devices", [dict(address="A", name="戒指", rssi=-50)])
+        self.c.handle("scan_finished", None)
+        self.pump()
+        self.assertFalse(page.scanning.isVisible())
+        self.assertFalse(page.scanning.spinner.animating)
+        self.assertEqual(page.scan.text(), "扫描")
+        self.assertTrue(page.scan.isEnabled())
+        self.assertEqual(page.table.rowCount(), 1)
+
+    def test_connecting_and_training_show_progress(self):
+        self.win.navigate("device")
+        self.pump()
+        device = self.win.pages["device"]
+        self.c.set_address("A")
+        device.connect_button.click()
+        self.pump()
+        self.assertTrue(device.connecting.isVisible())
+        self.assertIn("可点击取消", self.win.device_card.detail.text())
+        self.win.navigate("train")
+        self.pump()
+        train = self.win.pages["train"]
+        self.assertFalse(train.working.isVisible())
+        self.c.training = True
+        self.c.notify()
+        self.assertTrue(train.working.isVisible())
+
+    def test_switch_knob_slides_to_its_target(self):
+        switch = Switch("x")
+        switch.show()
+        switch.setChecked(True)
+        self.assertLess(switch._position, 1.0)
+        QTest.qWait(theme.MOTION_FAST + 60)
+        self.assertEqual(switch._position, 1.0)
+        switch.close()
+
+    def test_navigation_highlight_slides_and_fade_cleans_itself_up(self):
+        target = self.win.nav_buttons["audio"].geometry()
+        self.win.navigate("audio")
+        self.assertIs(self.win.stack.currentWidget(), self.win.pages["audio"], "content switches at once")
+        self.assertNotEqual(self.win.nav_indicator.geometry(), target, "highlight is still travelling")
+        fade = self.win.stack.findChild(CrossFade)
+        self.assertTrue(fade.isVisible())
+        self.win.navigate("tools")  # A second click mid-transition restarts the same overlay.
+        self.assertEqual(len(self.win.stack.findChildren(CrossFade)), 1)
+        QTest.qWait(theme.MOTION + 80)
+        self.assertFalse(fade.isVisible())
+        self.assertIsNone(fade._pixmap)
+        self.win.navigate("train")  # Navigating after a finished fade must still work.
+        self.assertTrue(fade.isVisible())
+        self.win.navigate("tools")
+        QTest.qWait(theme.MOTION + 80)
+        self.assertEqual(self.win.nav_indicator.geometry(), self.win.nav_buttons["tools"].geometry())
+        self.win.navigate("device")
+        self.assertFalse(self.win.nav_indicator.isVisible())
+        self.win.navigate("capture")
+        self.assertTrue(self.win.nav_indicator.isVisible())
+
+    def test_each_recognition_replays_result_motion_even_for_same_gesture(self):
+        self.connect()
+        self.win.navigate("live")
+        self.pump()
+        page = self.win.pages["live"]
+        prediction = Mock(confidence=None, score=-1.0, start_sample=None, end_sample=None)
+        prediction.name = "甲"
+        for _ in range(2):
+            QTest.qWait(theme.MOTION + 60)
+            self.c._record_prediction(prediction)
+            self.c.notify()
+            self.assertEqual(page._result_motion.state(), QVariantAnimation.State.Running)
+        self.assertEqual(page.result.text(), "甲")
 
     def test_every_page_fits_minimum_window_width(self):
         self.win.resize(1100, 720)

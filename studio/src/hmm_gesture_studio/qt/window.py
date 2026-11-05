@@ -2,15 +2,17 @@
 """Main window: sidebar, pages, and a collapsible log."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRect, QSize, Qt, QVariantAnimation
+from PySide6.QtGui import QColor, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
-    QButtonGroup, QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QPushButton, QStackedWidget, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
 from . import theme
 from .controller import StudioController
 from .dialogs import QtDialogs
+from .motion import CrossFade
 from .pages.audio import AudioPage
 from .pages.capture import CapturePage
 from .pages.device import DevicePage
@@ -23,6 +25,7 @@ from .widgets import button, label, set_text, set_tone
 NAV = (("capture", "采集"), ("train", "训练"), ("live", "实时"), ("diagnostics", "诊断"),
        ("audio", "录音"), ("tools", "设备工具"))
 LOG_LINES = 1500
+LOG_HEIGHT = 240
 
 
 class DeviceCard(QPushButton):
@@ -62,13 +65,93 @@ class DeviceCard(QPushButton):
         set_tone(self.detail, c.battery_tone if c.connected and c.battery_tone != "normal" else None)
 
 
+_LEVEL_LABELS = {"warning": "警告：", "error": "错误："}
+_LEVEL_COLORS = {"warning": theme.WARNING, "error": theme.CRITICAL}
+_LOG_ROLE = Qt.ItemDataRole.UserRole
+
+
+class _LogRowDelegate(QStyledItemDelegate):
+    """One row per message: time column, then the wrapped text, with a hairline."""
+
+    TIME_WIDTH = 72
+    PADDING = 10
+
+    def _text_width(self, width):
+        return max(80, width - self.TIME_WIDTH - 2 * self.PADDING)
+
+    def sizeHint(self, option, index):
+        _time, _level, text = index.data(_LOG_ROLE)
+        width = option.widget.viewport().width() if option.widget else option.rect.width()
+        bounds = option.fontMetrics.boundingRect(
+            QRect(0, 0, self._text_width(width), 100000), Qt.TextFlag.TextWordWrap, text)
+        return QSize(width, bounds.height() + 14)
+
+    def paint(self, painter, option, index):
+        when, level, text = index.data(_LOG_ROLE)
+        painter.save()
+        rect = option.rect
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(rect, QColor(theme.CONTROL_GRAY))
+        painter.setPen(QColor(theme.SLATE))
+        top = rect.top() + 7
+        painter.drawText(QRect(rect.left() + self.PADDING, top, self.TIME_WIDTH, rect.height() - 14),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, when)
+        painter.setPen(QColor(_LEVEL_COLORS.get(level, theme.INK)))
+        painter.drawText(QRect(rect.left() + self.PADDING + self.TIME_WIDTH, top,
+                               self._text_width(rect.width()), rect.height() - 14),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap, text)
+        painter.setPen(QColor(theme.CONTROL_GRAY))
+        painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
+        painter.restore()
+
+
+class LogList(QListWidget):
+    """Newest last. Follows new rows unless the reader has scrolled up; Ctrl+C copies."""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("logList")
+        self.setItemDelegate(_LogRowDelegate(self))
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setResizeMode(QListWidget.ResizeMode.Adjust)
+        font = self.font()
+        font.setPixelSize(12)
+        self.setFont(font)
+
+    def add_entry(self, when, level, text):
+        bar = self.verticalScrollBar()
+        following = bar.value() >= bar.maximum()
+        item = QListWidgetItem()
+        shown = _LEVEL_LABELS.get(level, "") + text
+        item.setData(_LOG_ROLE, (when, level, shown))
+        self.addItem(item)
+        while self.count() > LOG_LINES:
+            self.takeItem(0)
+        if following:
+            self.scrollToBottom()
+
+    def entries(self):
+        return [self.item(i).data(_LOG_ROLE) for i in range(self.count())]
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy):
+            rows = sorted(self.selectedIndexes(), key=lambda index: index.row())
+            lines = ["  ".join((index.data(_LOG_ROLE)[0], index.data(_LOG_ROLE)[2])) for index in rows]
+            QApplication.clipboard().setText("\n".join(lines))
+        else:
+            super().keyPressEvent(event)
+
+
 class LogBar(QWidget):
-    """One-line latest message; expands to the full log."""
+    """One-line latest message; expands into the full list."""
 
     def __init__(self):
         super().__init__()
         self.setObjectName("logBar")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._expanded = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 4, 16, 4)
         layout.setSpacing(4)
@@ -79,23 +162,38 @@ class LogBar(QWidget):
         self.toggle = button("显示日志", self._toggle, kind="link")
         top.addWidget(self.toggle)
         layout.addLayout(top)
-        self.view = QPlainTextEdit()
-        self.view.setReadOnly(True)
-        self.view.setMaximumBlockCount(LOG_LINES)
-        self.view.setFixedHeight(180)
+        self.view = LogList()
+        self.view.setFixedHeight(0)
         self.view.hide()
         layout.addWidget(self.view)
+        self._motion = QVariantAnimation(self)
+        self._motion.setDuration(theme.MOTION)
+        self._motion.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._motion.valueChanged.connect(lambda height: self.view.setFixedHeight(int(height)))
+        self._motion.finished.connect(self._motion_finished)
 
-    def append(self, text):
-        self.view.appendPlainText(text)
-        first = text.splitlines()[0] if text else ""
+    def append(self, when, level, text):
+        self.view.add_entry(when, level, text)
+        lines = text.splitlines()
+        first = f"{when}  {_LEVEL_LABELS.get(level, '')}{lines[0] if lines else ''}"
         self.latest.setText(QFontMetrics(self.latest.font()).elidedText(
             first, Qt.TextElideMode.ElideRight, max(200, self.latest.width())))
+        set_tone(self.latest, {"warning": "warning", "error": "critical"}.get(level))
 
     def _toggle(self):
-        visible = not self.view.isVisible()
-        self.view.setVisible(visible)
-        self.toggle.setText("收起日志" if visible else "显示日志")
+        self._expanded = not self._expanded
+        self.toggle.setText("收起日志" if self._expanded else "显示日志")
+        self._motion.stop()
+        self._motion.setStartValue(self.view.height() if self.view.isVisible() else 0)
+        self._motion.setEndValue(LOG_HEIGHT if self._expanded else 0)
+        self.view.show()
+        self._motion.start()
+
+    def _motion_finished(self):
+        if self._expanded:
+            self.view.scrollToBottom()  # The list only now has its final height.
+        else:
+            self.view.hide()
 
 
 class MainWindow(QMainWindow):
@@ -108,6 +206,7 @@ class MainWindow(QMainWindow):
         if self.controller.dialogs.__class__ is QtDialogs:
             self.controller.dialogs.parent = self
         self._may_close = False
+        self._current_page = None
         root = QWidget()
         root.setObjectName("canvas")
         self.setCentralWidget(root)
@@ -119,6 +218,7 @@ class MainWindow(QMainWindow):
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(0)
         self.stack = QStackedWidget()
+        self._fade = CrossFade(self.stack)
         right.addWidget(self.stack, 1)
         self.log_bar = LogBar()
         right.addWidget(self.log_bar)
@@ -146,6 +246,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(12, 20, 12, 12)
         layout.setSpacing(2)
+        self.nav_indicator = QFrame(sidebar)
+        self.nav_indicator.setObjectName("navIndicator")
+        self.nav_indicator.lower()
+        self._nav_motion = QPropertyAnimation(self.nav_indicator, b"geometry", self)
+        self._nav_motion.setDuration(theme.MOTION)
+        self._nav_motion.setEasingCurve(QEasingCurve.Type.OutCubic)
         brand = label("OpenZilo", "brand")
         brand.setContentsMargins(12, 0, 0, 16)
         layout.addWidget(brand)
@@ -163,10 +269,41 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.device_card)
         return sidebar
 
+    def _place_nav_indicator(self, *, animate):
+        """Slide the highlight behind the current row; the device page has none."""
+        current = self.nav_buttons.get(self._current_page)
+        self._nav_motion.stop()
+        if current is None:
+            self.nav_indicator.hide()
+            return
+        target = current.geometry()
+        if animate and self.nav_indicator.isVisible() and self.isVisible():
+            self._nav_motion.setStartValue(self.nav_indicator.geometry())
+            self._nav_motion.setEndValue(target)
+            self._nav_motion.start()
+        else:
+            self.nav_indicator.setGeometry(target)
+            self.nav_indicator.show()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.layout().activate()
+        self._place_nav_indicator(animate=False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_nav_indicator(animate=False)
+
     def navigate(self, name):
-        self.stack.setCurrentWidget(self.pages[name])
+        target = self.pages[name]
+        if self.isVisible() and self.stack.currentWidget() is not target:
+            self._fade.play(self.stack.grab())
+        self.stack.setCurrentWidget(target)
+        self._fade.raise_()
+        self._current_page = name
         for key, item in self.nav_buttons.items():
             item.setChecked(key == name)
+        self._place_nav_indicator(animate=True)
         current = "true" if name == "device" else "false"
         if self.device_card.property("current") != current:
             self.device_card.setProperty("current", current)

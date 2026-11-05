@@ -269,6 +269,21 @@ class WorkerTests(unittest.TestCase):
         self.scan.assert_awaited_once_with(timeout_s=8.0)
         self.assertTrue(self.worker._thread.daemon)
 
+    def test_scan_end_is_reported_after_success_failure_and_rejection(self):
+        self.scan.return_value = []
+        self.worker.scan()
+        self.event("devices")
+        self.assertIsNone(self.event("scan_finished"))
+        self.scan.side_effect = sdk.OpenZiloError("蓝牙不可用")
+        self.worker.scan()
+        self.assertIn("蓝牙不可用", self.event("error"))
+        self.assertIsNone(self.event("scan_finished"))
+        self.scan.side_effect = None
+        self.streaming()
+        self.worker.scan()  # Rejected: the connection session owns the worker.
+        self.assertIn("already active", self.event("error"))
+        self.assertIsNone(self.event("scan_finished"))
+
     def test_single_consumer_and_stop_before_disconnect(self):
         self.streaming()
         self.worker.connect("other")

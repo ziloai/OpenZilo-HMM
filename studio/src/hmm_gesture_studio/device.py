@@ -225,6 +225,8 @@ class RingWorker:
                 )
                 if kind == "connect" and self._busy != "connect":
                     self._loop.call_soon_threadsafe(self._emit, "disconnected", None)
+                if kind == "scan" and self._busy != "scan":
+                    self._loop.call_soon_threadsafe(self._emit, "scan_finished", None)
                 return
             self._busy = kind
             self._disconnecting = False
@@ -847,6 +849,9 @@ class RingWorker:
                     self._emit("warning" if isinstance(error, sdk.TimeoutError) else "error", str(error))
             if kind == "connect":
                 self._emit("disconnected", None)
+            elif kind == "scan":
+                # Fires after success, failure or cancellation alike.
+                self._emit("scan_finished", None)
             if self._closing:
                 self._loop.stop()
 

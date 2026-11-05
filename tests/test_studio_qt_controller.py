@@ -91,6 +91,38 @@ class DeviceTests(Base):
         self.assertEqual([(e["name"], e["source"], e["rssi"]) for e in c.device_entries],
                          [("戒指新名", "历史", -40), ("未命名", "扫描", -60)])
 
+    def test_scan_state_ends_only_when_worker_reports_it(self):
+        c = self.c
+        c.scan()
+        self.worker.scan.assert_called_once()
+        self.assertTrue(c.scanning)
+        self.assertFalse(c.can_scan or c.can_connect)
+        c.handle("devices", [])
+        self.assertTrue(c.scanning)
+        c.handle("scan_finished", None)
+        self.assertFalse(c.scanning)
+        self.assertTrue(c.can_scan and c.can_connect)
+
+    def test_failed_scan_request_does_not_leave_progress_running(self):
+        self.worker.scan.side_effect = RuntimeError("蓝牙不可用")
+        self.c.scan()
+        self.assertFalse(self.c.scanning)
+        self.assertIn("蓝牙不可用", self.errors()[-1])
+
+    def test_scan_is_unavailable_while_a_connection_session_is_active(self):
+        self.connect()
+        self.assertFalse(self.c.can_scan)
+        self.c.scan()
+        self.worker.scan.assert_not_called()
+        self.assertTrue(self.errors())
+
+    def test_connect_during_scan_is_rejected_before_the_worker(self):
+        self.c.set_address(ADDRESS)
+        self.c.scan()
+        self.c.connect_device()
+        self.worker.connect.assert_not_called()
+        self.assertFalse(self.c.connecting)
+
     def test_battery_renders_only_reported_values(self):
         c = self.c
         for payload, text, tone in (
