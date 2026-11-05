@@ -2,10 +2,10 @@
 """Small, consistent building blocks. Their look comes from theme.STYLESHEET."""
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QRectF, QSize, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QTableWidget, QVBoxLayout, QWidget,
 )
 
@@ -72,12 +72,16 @@ def row(*items, spacing=theme.ELEMENT_GAP, stretch=True):
     return layout
 
 
-def field(caption, widget):
+def field(caption, content):
+    """A caption above a widget or layout, such as an input and its action button."""
     layout = QVBoxLayout()
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(4)
     layout.addWidget(label(caption, "caption"))
-    layout.addWidget(widget)
+    if isinstance(content, QWidget):
+        layout.addWidget(content)
+    else:
+        layout.addLayout(content)
     return layout
 
 
@@ -126,6 +130,11 @@ class Switch(QWidget):
         super().__init__()
         self._checked = False
         self._text = text
+        self._position = 0.0
+        self._slide = QVariantAnimation(self)
+        self._slide.setDuration(theme.MOTION_FAST)
+        self._slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._slide.valueChanged.connect(self._set_position)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -143,7 +152,18 @@ class Switch(QWidget):
         """Reflect state without emitting; only user input emits toggled."""
         if self._checked != bool(checked):
             self._checked = bool(checked)
-            self.update()
+            target = 1.0 if self._checked else 0.0
+            self._slide.stop()
+            if self.isVisible():
+                self._slide.setStartValue(self._position)
+                self._slide.setEndValue(target)
+                self._slide.start()
+            else:
+                self._set_position(target)
+
+    def _set_position(self, value):
+        self._position = float(value)
+        self.update()
 
     def _activate(self):
         if self.isEnabled():
@@ -168,13 +188,16 @@ class Switch(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         enabled = self.isEnabled()
-        track = theme.PRICING_BLUE if self._checked and enabled else theme.CONTROL_GRAY
-        painter.setPen(QPen(QColor(theme.PRICING_BLUE), 2) if self.hasFocus() else Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(track))
+        off, on = QColor(theme.CONTROL_GRAY), QColor(theme.PRICING_BLUE)
+        amount = self._position if enabled else 0.0
+        track = QColor(*(int(a + (b - a) * amount) for a, b in
+                         zip(off.getRgb()[:3], on.getRgb()[:3])))
+        painter.setPen(QPen(on, 2) if self.hasFocus() else Qt.PenStyle.NoPen)
+        painter.setBrush(track)
         painter.drawRoundedRect(QRectF(1, 3, 34, 18), 9, 9)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(theme.GALLERY_WHITE))
-        painter.drawEllipse(QRectF(19 if self._checked else 3, 5, 14, 14))
+        painter.drawEllipse(QRectF(3 + 16 * self._position, 5, 14, 14))
         if self._text:
             painter.setPen(QColor(theme.INK if enabled else theme.STEEL))
             painter.drawText(QRectF(44, 0, self.width() - 44, 24),
@@ -182,39 +205,12 @@ class Switch(QWidget):
         painter.end()
 
 
-class Segmented(QFrame):
-    changed = Signal(int)
-
-    def __init__(self, options):
-        super().__init__()
-        self.setObjectName("segmented")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(0)
-        self._group = QButtonGroup(self)
-        self._group.setExclusive(True)
-        for index, text in enumerate(options):
-            item = button(text, kind="segment")
-            item.setCheckable(True)
-            self._group.addButton(item, index)
-            layout.addWidget(item)
-        self._group.button(0).setChecked(True)
-        self._group.idClicked.connect(self.changed)
-
-    def current(self):
-        return self._group.checkedId()
-
-    def setCurrent(self, index):
-        self._group.button(index).setChecked(True)
-        self.changed.emit(index)
-
-
 class Card(QFrame):
-    """28px shadowless card. white sits on a mist band; mist sits on the white canvas."""
+    """28px shadowless card, separated from the white canvas by a hairline."""
 
-    def __init__(self, title=None, *, tone="white", spacing=theme.ELEMENT_GAP):
+    def __init__(self, title=None, *, spacing=theme.ELEMENT_GAP):
         super().__init__()
-        self.setObjectName("card" if tone == "white" else "cardMist")
+        self.setObjectName("card")
         self.body = QVBoxLayout(self)
         p = theme.CARD_PADDING
         self.body.setContentsMargins(p, p - 4, p, p - 4)
@@ -281,11 +277,11 @@ def table(columns, *, multi=False, height=220):
 
 
 class Section(QWidget):
-    """A full-width chapter: white canvas, or a mist band that holds white cards."""
+    """A chapter of a page, on the white canvas."""
 
-    def __init__(self, *, band=False, top=theme.SECTION_GAP, bottom=theme.SECTION_GAP):
+    def __init__(self, *, top=theme.SECTION_GAP, bottom=theme.SECTION_GAP):
         super().__init__()
-        self.setObjectName("band" if band else "plain")
+        self.setObjectName("plain")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         outer = QHBoxLayout(self)
         outer.setContentsMargins(theme.PAGE_MARGIN, top, theme.PAGE_MARGIN, bottom)
@@ -325,8 +321,9 @@ class Page(QScrollArea):
         controller.stateChanged.connect(self._render_if_visible)
         controller.tick.connect(self._tick_if_visible)
 
-    def add_section(self, *, band=False, top=theme.SECTION_GAP, bottom=theme.SECTION_GAP):
-        section = Section(band=band, top=top, bottom=bottom)
+    def add_section(self):
+        # Only the first section needs top space; later ones follow the previous bottom.
+        section = Section(top=0 if self._sections.count() else theme.SECTION_GAP)
         self._sections.addWidget(section)
         return section
 

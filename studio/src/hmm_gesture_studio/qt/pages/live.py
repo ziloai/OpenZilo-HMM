@@ -2,6 +2,9 @@
 """Live recognition; the latest result is the page's visual event."""
 from __future__ import annotations
 
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation
+from PySide6.QtWidgets import QGraphicsOpacityEffect
+
 from .. import theme
 from ..charts import LiveImuChart
 from ..widgets import DeviceNotice, Page, Switch, button, label, row, set_text
@@ -22,6 +25,15 @@ class LivePage(Page):
         self.pause_state = label(tone="muted")
         top.add(row(self.switch, self.pause, self.clear, self.pause_state))
         self.result = label("—", "result")
+        self._result_fade = QGraphicsOpacityEffect(self.result)
+        self._result_fade.setOpacity(1.0)
+        self.result.setGraphicsEffect(self._result_fade)
+        self._result_motion = QPropertyAnimation(self._result_fade, b"opacity", self)
+        self._result_motion.setDuration(theme.MOTION)
+        self._result_motion.setStartValue(0.1)
+        self._result_motion.setEndValue(1.0)
+        self._result_motion.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._shown_serial = controller.prediction_serial
         top.add(self.result)
         self.detail = label(tone="muted", wrap=True)
         top.add(self.detail)
@@ -44,6 +56,10 @@ class LivePage(Page):
         paused = c.stream.paused
         set_text(self.pause, "恢复显示" if paused else "暂停显示")
         set_text(self.pause_state, "显示已冻结（仍接收数据）" if paused else "实时显示")
+        if c.prediction_serial != self._shown_serial:
+            # Replays for a repeated gesture too, whose text alone would not change.
+            self._shown_serial = c.prediction_serial
+            self._result_motion.start()
         if c.prediction is not None:
             set_text(self.result, c.prediction[0])
             set_text(self.detail, c.prediction[1])

@@ -2,8 +2,11 @@
 """Local IMU calibration and signed firmware updates."""
 from __future__ import annotations
 
+from PySide6.QtCore import QPropertyAnimation
 from PySide6.QtWidgets import QHBoxLayout, QProgressBar
 
+from .. import theme
+from ..motion import Busy
 from ..widgets import (
     Card, DeviceNotice, Page, ReadOnlyText, button, field, label, line_edit, row, set_field_text, set_text,
 )
@@ -13,14 +16,14 @@ class ToolsPage(Page):
     def __init__(self, controller, navigate=None):
         super().__init__(controller, navigate)
         t = controller.tools
-        top = self.add_section(bottom=20)
+        top = self.add_section()
         self.header(top, "设备工具", "校准与升级独占 IMU 或连接；开始前请停止录音和手势录制。")
         self.notice = DeviceNotice(self, "尚未连接戒指。")
         top.add(self.notice)
         self.capabilities = label(tone="muted", wrap=True)
         top.add(self.capabilities)
 
-        calibration = Card("本机 IMU 校准", tone="mist")
+        calibration = Card("本机 IMU 校准")
         top.add(calibration)
         calibration.add(label("校准独占 IMU，停止手势识别；全部验证通过才替换本机配置，不向戒指写参数。"
                               "校准值不进入手势训练、录制或识别。", "caption", wrap=True))
@@ -43,24 +46,23 @@ class ToolsPage(Page):
         calibration.add(self.sample)
         calibration.add(label("诊断仅显示 g / °/s，不进入原始录制或训练流水线。", "caption", wrap=True))
 
-        band = self.add_section(band=True, top=40)
-        band.add(label("签名固件 OTA", "section"))
-        band.add(label("不能信任固件包自带的公钥。拒绝测试固件；不支持原始 BIN。", tone="muted", wrap=True))
-        firmware = Card(tone="white")
-        band.add(firmware)
+        more = self.add_section()
+        more.add(label("签名固件 OTA", "section"))
+        more.add(label("不能信任固件包自带的公钥。拒绝测试固件；不支持原始 BIN。", tone="muted", wrap=True))
+        firmware = Card()
+        more.add(firmware)
         paths = QHBoxLayout()
         paths.setSpacing(20)
         self.zip = line_edit(on_edit=lambda value: t.set_firmware_path("zip", value), placeholder="固件 .ota.zip")
         self.zip_choose = button("选择", lambda: t.choose_firmware_file("zip"))
         self.key = line_edit(on_edit=lambda value: t.set_firmware_path("key", value), placeholder="独立来源的公钥 .pem")
         self.key_choose = button("选择", lambda: t.choose_firmware_file("key"))
-        paths.addLayout(field("固件 ZIP", self.zip), 1)
-        paths.addWidget(self.zip_choose, 0)
-        paths.addLayout(field("可信公钥 PEM", self.key), 1)
-        paths.addWidget(self.key_choose, 0)
+        paths.addLayout(field("固件 ZIP", row(self.zip, self.zip_choose, stretch=False)), 1)
+        paths.addLayout(field("可信公钥 PEM", row(self.key, self.key_choose, stretch=False)), 1)
         firmware.add(paths)
         self.inspect = button("离线验签并查看", t.inspect_firmware)
-        firmware.add(row(self.inspect))
+        self.inspecting = Busy("正在离线验签…")
+        firmware.add(row(self.inspect, self.inspecting))
         self.firmware_text = ReadOnlyText(t.firmware_text, height=150)
         firmware.add(self.firmware_text)
         self.install = button("确认设备并升级", t.install_firmware, kind="primary")
@@ -68,6 +70,8 @@ class ToolsPage(Page):
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setRange(0, 100)
+        self._progress_motion = QPropertyAnimation(self.progress, b"value", self)
+        self._progress_motion.setDuration(theme.MOTION)
         firmware.add(self.progress)
         self.firmware_status = label(wrap=True)
         firmware.add(self.firmware_status)
@@ -93,5 +97,11 @@ class ToolsPage(Page):
         set_field_text(self.zip, t.zip_path)
         set_field_text(self.key, t.key_path)
         self.firmware_text.set_value(t.firmware_text)
-        self.progress.setValue(round(t.progress))
+        target = round(t.progress)
+        if self._progress_motion.endValue() != target:
+            self._progress_motion.stop()
+            self._progress_motion.setStartValue(self.progress.value())
+            self._progress_motion.setEndValue(target)
+            self._progress_motion.start()
+        self.inspecting.set_busy(t.inspection_pending)
         set_text(self.firmware_status, t.firmware_status)

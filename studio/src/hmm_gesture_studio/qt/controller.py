@@ -37,11 +37,10 @@ _STARTUP_HINTS = (
 
 class StudioController(QObject):
     stateChanged = Signal()
-    logged = Signal(str)
+    logged = Signal(str, str, str)  # time, level (info/warning/error), text
     paramsReplaced = Signal()
     previewChanged = Signal()
     previewRevealed = Signal()
-    liveRevealed = Signal()
     datasetsChanged = Signal()
     devicesChanged = Signal()
     audioFieldsChanged = Signal()
@@ -81,6 +80,7 @@ class StudioController(QObject):
         self.scanned_devices = []
         self.connected = False
         self.connecting = False
+        self.scanning = False
         self.device_name = ""
         self.actual_rate = None
         self.imu_active = False
@@ -124,6 +124,7 @@ class StudioController(QObject):
         self.live = False
         self.recognition_origin = 0
         self.prediction = None
+        self.prediction_serial = 0
         self.result_text = "—"
         # Audio.
         self.audio_state = "idle"
@@ -174,11 +175,11 @@ class StudioController(QObject):
             except Exception as exc:
                 self.log(f"处理 {event} 事件失败：{exc}")
 
-    def log(self, text):
-        self.logged.emit(f"{time.strftime('%H:%M:%S')}  {text}")
+    def log(self, text, level="info"):
+        self.logged.emit(time.strftime("%H:%M:%S"), level, str(text))
 
     def error(self, text):
-        self.log(f"错误：{text}")
+        self.log(text, "error")
         self.dialogs.error("操作失败", str(text))
 
     def request(self, action):
@@ -232,11 +233,14 @@ class StudioController(QObject):
 
     @property
     def can_scan(self):
-        return not self.closing and not self.tools.busy
+        # The worker runs one scan or connection session at a time.
+        return (not self.closing and not self.tools.busy and not self.scanning
+                and not self.connected and not self.connecting)
 
     @property
     def can_connect(self):
-        return not self.closing and not self.tools.busy and not self.connected and not self.connecting
+        return (not self.closing and not self.tools.busy and not self.scanning
+                and not self.connected and not self.connecting)
 
     @property
     def can_disconnect(self):
@@ -523,7 +527,6 @@ class StudioController(QObject):
             return
         self.take_rate = self.actual_rate
         self.take = []
-        self.liveRevealed.emit()
         self.notify()
 
     def undo(self):
@@ -903,6 +906,7 @@ class StudioController(QObject):
         assessment = ("单类匹配，通过拒识检查（无相对置信度）" if prediction.confidence is None else
                       f"相对置信度 {prediction.confidence:.3f}（非概率）")
         self.prediction = (prediction.name, f"{assessment}；分数 {prediction.score:.3f}")
+        self.prediction_serial += 1
         self.result_text = f"{prediction.name}；{self.prediction[1]}"
         self.log(self.result_text)
         if prediction.start_sample is not None and prediction.end_sample is not None:
@@ -1014,7 +1018,14 @@ class StudioController(QObject):
             self.error(str(exc))
 
     def scan(self):
-        self.device_request(self.worker.scan)
+        if not self.can_scan:
+            self.error("请等待当前操作结束；连接设备期间不能扫描，请先断开。")
+            return
+        self.scanning = True
+        self.notify()
+        if not self.device_request(self.worker.scan):
+            self.scanning = False
+            self.notify()
 
     def retry_imu(self):
         self.device_request(self.worker.retry_imu, imu=True)
@@ -1029,6 +1040,9 @@ class StudioController(QObject):
             return
         if self.connected or self.connecting:
             self.error("请先断开当前设备 / 取消正在进行的连接。")
+            return
+        if self.scanning:
+            self.error("请等待扫描结束后再连接。")
             return
         if not self.confirm_discard():
             return
@@ -1208,8 +1222,13 @@ class StudioController(QObject):
             self.audioFilesChanged.emit()
             raw_path = payload.get("raw_path")
             self.log(f"录音已保存：{path}" + (f"；原始文件：{raw_path}" if raw_path else ""))
-        elif event in ("warning", "error", "progress"):
-            self.log(f"{event}：{payload}")
+        elif event == "scan_finished":
+            self.scanning = False
+            self.notify()
+        elif event in ("warning", "error"):
+            self.log(payload, event)
+        elif event == "progress":
+            self.log(payload)
         elif event == "trained":
             bundle, summary, revision = payload
             self.training = False
@@ -1262,6 +1281,7 @@ class StudioController(QObject):
         if self.tools.firmware_locked:
             return
         self.closing = True
+        self.scanning = False
         self.cancel_take()
         self.stop_live()
         self.executor.shutdown(wait=False, cancel_futures=True)

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHeaderView, QStackedWidget, QTableWidgetItem, QWidget, QVBoxLayout
+from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
 
 from .. import theme
-from ..charts import LiveImuChart, RecordingChart
+from ..charts import RecordingChart
+from ..motion import PulseDot
 from ..widgets import (
-    Card, Combo, DeviceNotice, Page, Segmented, Switch, button, field, label, line_edit, row, set_field_text,
-    set_kind, set_text, table,
+    Card, Combo, DeviceNotice, Page, Switch, button, label, line_edit, row, set_field_text, set_kind, set_text, table,
 )
 
 
@@ -17,6 +17,7 @@ class CapturePage(Page):
     def __init__(self, controller, navigate=None):
         super().__init__(controller, navigate)
         c = controller
+        self._shown = (None, False)
         top = self.add_section()
         self.header(top, "采集手势", "每次录制一个完整动作，前后留少量静止。每次至少 12 个样本；拒识标定每类至少 3 次，建议 5–10 次以上。")
         self.notice = DeviceNotice(self, "尚未连接戒指。")
@@ -28,47 +29,36 @@ class CapturePage(Page):
         self.save = button("保存 / 追加", c.save_takes)
         self.discard = button("清空未保存录制", c.discard_takes)
         top.add(row(self.name, self.record, self.undo, self.save, self.discard))
+        self.pulse = PulseDot()
+        self.pulse.hide()
         self.takes = label(tone="muted")
-        top.add(self.takes)
+        self.stream = label(role="caption")
+        status = row(self.pulse, self.takes, spacing=8)
+        status.addWidget(self.stream)
+        top.add(status)
 
-        self.mode = Segmented(("实时曲线", "录制波形"))
-        self.mode.changed.connect(self._set_mode)
-        self.pause = button("暂停显示", self._toggle_pause)
-        self.clear = button("清空", c.stream.clear)
-        self.pause_state = label("实时显示", tone="muted")
+        self.title = label(role="cardTitle")
         self.choice = Combo()
         self.choice.setMinimumWidth(180)
         self.choice.activated.connect(c.set_preview_index)
         self.overlay = Switch("叠加原始波形（虚线）")
         self.overlay.setChecked(True)
         self.selecting = Switch("手动框选")
-        self.reset_crop = button("恢复自动裁剪", lambda: self._restore_automatic())
-        live_tools = QWidget()
-        live_tools.setLayout(row(self.pause, self.clear, self.pause_state))
-        wave_tools = QWidget()
-        wave_tools.setLayout(row(self.choice, self.overlay, self.selecting, self.reset_crop))
-        self.tools_stack = QStackedWidget()
-        self.tools_stack.addWidget(live_tools)
-        self.tools_stack.addWidget(wave_tools)
-        self.tools_stack.setFixedHeight(32)
-        top.add(row(self.mode, self.tools_stack))
-
-        self.live_chart = LiveImuChart(c.stream)
-        self.wave_chart = RecordingChart(c.set_preview_training_region)
-        self.chart_stack = QStackedWidget()
-        self.chart_stack.addWidget(self.live_chart)
-        self.chart_stack.addWidget(self.wave_chart)
-        self.chart_stack.setFixedHeight(theme.CHART_HEIGHT)
-        top.add(self.chart_stack)
+        self.reset_crop = button("恢复自动裁剪", self._restore_automatic)
+        top.add(self.title)
+        top.add(row(self.choice, self.overlay, self.selecting, self.reset_crop))
+        self.chart = RecordingChart(c.set_preview_training_region)
+        self.chart.setFixedHeight(theme.CAPTURE_CHART_HEIGHT)
+        top.add(self.chart)
         self.caption = label(role="caption", wrap=True)
         top.add(self.caption)
-        self.overlay.toggled.connect(self.wave_chart.set_overlay)
+        self.overlay.toggled.connect(self.chart.set_overlay)
         self.selecting.toggled.connect(lambda _on: self._sync_selection())
 
-        band = self.add_section(band=True)
-        band.add(label("数据集", "section"))
-        card = Card(tone="white")
-        band.add(card)
+        more = self.add_section()
+        more.add(label("数据集", "section"))
+        card = Card()
+        more.add(card)
         self.directory = label(tone="muted", selectable=True)
         self.choose_dir = button("选择数据目录", c.choose_directory)
         card.add(row(self.directory, self.choose_dir))
@@ -89,34 +79,36 @@ class CapturePage(Page):
 
         c.datasetsChanged.connect(self._rebuild_table)
         c.previewChanged.connect(self._preview_changed)
-        c.previewRevealed.connect(lambda: self.mode.setCurrent(1))
-        c.liveRevealed.connect(lambda: self.mode.setCurrent(0))
         self._rebuild_table()
         self._preview_changed()
-
-    def _toggle_pause(self):
-        self.controller.stream.toggle_pause()
-        self.render_state()
 
     def _restore_automatic(self):
         self.selecting.setChecked(False)
         self.controller.set_preview_training_region(None)
 
-    def _set_mode(self, index):
-        self.chart_stack.setCurrentIndex(index)
-        self.tools_stack.setCurrentIndex(index)
-        self.render_state()
+    def _sync_chart(self):
+        """While recording, the placeholder replaces any earlier take's waveform."""
+        c = self.controller
+        recording = c.take is not None
+        shown = (c.preview_view, recording)
+        if shown[0] is self._shown[0] and shown[1] == self._shown[1]:
+            return
+        self._shown = shown
+        if recording:
+            self.chart.set_view(None, "正在录制，停止后显示波形")
+        else:
+            self.chart.set_view(c.preview_view)
 
     def _sync_selection(self):
         c = self.controller
-        can_edit = c.preview_can_edit
+        can_edit = c.preview_can_edit and c.take is None
         view = c.preview_view
         # Keep the mode through a temporary lock such as training, but not without data.
         if view is None or len(view.raw) < view.min_samples:
             self.selecting.setChecked(False)
         self.selecting.setEnabled(can_edit)
         self.reset_crop.setEnabled(can_edit and view is not None and view.training_region is not None)
-        self.wave_chart.set_selection(selecting=self.selecting.isChecked(), editable=can_edit)
+        self.chart.set_selection(selecting=self.selecting.isChecked(), editable=can_edit)
 
     def _preview_changed(self):
         c = self.controller
@@ -125,8 +117,7 @@ class CapturePage(Page):
         self.choice.addItems(c.preview_choices)
         self.choice.setCurrentIndex(c.preview_index)
         self.choice.blockSignals(False)
-        self.choice.setEnabled(bool(c.preview_choices))
-        self.wave_chart.set_view(c.preview_view)
+        self._sync_chart()
         self._sync_selection()
         if self.isVisible():
             self.render_state()
@@ -162,20 +153,16 @@ class CapturePage(Page):
         self.undo.setEnabled(c.can_undo)
         self.save.setEnabled(c.can_save)
         self.discard.setEnabled(c.can_discard)
+        self.pulse.setVisible(recording)
         set_text(self.takes, c.take_text)
-        paused = c.stream.paused
-        set_text(self.pause, "恢复显示" if paused else "暂停显示")
-        set_text(self.pause_state, "显示已冻结（仍接收数据）" if paused else "实时显示")
+        set_text(self.stream, c.stream_text)
         for widget in (self.choose_dir, self.refresh, self.import_json, self.import_csv):
             widget.setEnabled(not c.locked)
         self.delete.setEnabled(c.can_delete)
         set_text(self.directory, str(c.directory))
+        self.choice.setEnabled(bool(c.preview_choices) and not recording)
+        self._sync_chart()
         self._sync_selection()
-        if self.chart_stack.currentIndex() == 0:
-            set_text(self.caption, f"{c.stream_text}。横轴为相对最新样本的秒数（按采样率估算，非设备时间戳）；紫框 = 已识别片段。")
-        else:
-            set_text(self.caption, f"{c.preview_title} — {c.preview_message}。在任一图内水平拖动框选，再次拖动替换，Esc 取消；原始数据不变。")
-
-    def on_tick(self):
-        if self.chart_stack.currentIndex() == 0:
-            self.live_chart.redraw()
+        set_text(self.title, "录制中" if recording else f"录制波形 · {c.preview_title}")
+        set_text(self.caption, "" if recording else
+                 f"{c.preview_message}。在任一图内水平拖动框选，再次拖动替换，Esc 取消；原始数据不变。")

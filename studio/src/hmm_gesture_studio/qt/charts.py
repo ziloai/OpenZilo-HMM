@@ -234,6 +234,7 @@ class RecordingChart(QWidget):
         super().__init__()
         self._on_region = on_region
         self._view = None
+        self._empty_text = "暂无录制波形"
         self._overlay = True
         self._selecting = False
         self._editable = False
@@ -252,9 +253,10 @@ class RecordingChart(QWidget):
             panel.view_box.drag_handler = self._drag
         self._draw()
 
-    def set_view(self, view):
+    def set_view(self, view, empty_text="暂无录制波形"):
         self.cancel_drag()  # A switch/reload must never finish an earlier recording's drag.
         self._view = view
+        self._empty_text = empty_text
         self._draw()
 
     def set_overlay(self, enabled):
@@ -322,7 +324,7 @@ class RecordingChart(QWidget):
         for group, panel in enumerate((self.accel, self.gyro)):
             columns = slice(group * 3, group * 3 + 3)
             if view is None:
-                panel.set_data(np.empty(0), np.empty((0, 3)), x_range=(0.0, 1.0), empty_text="暂无录制波形")
+                panel.set_data(np.empty(0), np.empty((0, 3)), x_range=(0.0, 1.0), empty_text=self._empty_text)
             else:
                 x = np.arange(len(view.raw)) / view.rate
                 panel.set_data(x, view.filtered[:, columns], raw=view.raw[:, columns] if self._overlay else None,

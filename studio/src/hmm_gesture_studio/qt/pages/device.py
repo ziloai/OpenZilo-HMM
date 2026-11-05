@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QHeaderView, QTableWidgetItem
 
 from ...plotting import AXES
+from ..motion import Busy
 from ..widgets import Card, Page, StatTile, button, field, label, line_edit, row, set_field_text, set_text, set_tone, table
 
 
@@ -23,15 +24,17 @@ class DevicePage(Page):
         self.address.setMinimumWidth(320)
         self.connect_button = button("连接", c.connect_device, kind="primary")
         self.disconnect_button = button("断开 / 取消连接", c.disconnect_device)
-        top.add(row(self.address, self.connect_button, self.disconnect_button))
+        self.connecting = Busy("正在连接…")
+        top.add(row(self.address, self.connect_button, self.disconnect_button, self.connecting))
 
-        band = self.add_section(band=True)
-        band.add(label("可用设备", "section"))
-        devices = Card(tone="white")
-        band.add(devices)
+        more = self.add_section()
+        more.add(label("可用设备", "section"))
+        devices = Card()
+        more.add(devices)
         self.scan = button("扫描", c.scan)
         self.clear_history = button("清空设备历史", c.clear_device_history)
-        devices.add(row(self.scan, self.clear_history))
+        self.scanning = Busy("正在扫描附近的戒指，最长约 8 秒…")
+        devices.add(row(self.scan, self.clear_history, self.scanning))
         devices.add(label("历史设备可直接连接，无需重新扫描；最多保留最近 20 台。", "caption", wrap=True))
         self.table = table(("名称", "地址", "来源", "RSSI"), height=190)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -40,8 +43,8 @@ class DevicePage(Page):
         self.table.itemSelectionChanged.connect(self._selected)
         devices.add(self.table)
 
-        imu = Card("IMU 上报", tone="white")
-        band.add(imu)
+        imu = Card("IMU 上报")
+        more.add(imu)
         self.stream = label(wrap=True)
         imu.add(self.stream)
         self.tiles = [StatTile(name) for name in AXES]
@@ -58,8 +61,8 @@ class DevicePage(Page):
         imu.add(self.raw_note)
         self.retry = button("重试 IMU 上报", c.retry_imu)
         imu.add(row(self.retry))
-        capabilities = Card("设备能力", tone="white")
-        band.add(capabilities)
+        capabilities = Card("设备能力")
+        more.add(capabilities)
         self.capabilities = label(wrap=True)
         capabilities.add(self.capabilities)
         self.finish()
@@ -96,6 +99,9 @@ class DevicePage(Page):
         self.connect_button.setEnabled(c.can_connect)
         self.disconnect_button.setEnabled(c.can_disconnect)
         self.scan.setEnabled(c.can_scan)
+        set_text(self.scan, "扫描中…" if c.scanning else "扫描")
+        self.scanning.set_busy(c.scanning)
+        self.connecting.set_busy(c.connecting)
         self.table.setEnabled(c.can_connect)
         set_text(self.stream, c.stream_text)
         for index, tile in enumerate(self.tiles):

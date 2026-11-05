@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QGridLayout
 
+from ..motion import Busy
 from ..widgets import Card, Page, StatTile, button, field, label, line_edit, row, set_field_text, set_text
 
 _FIELDS = (("n_states", "状态数"), ("cutoff_hz", "低通 Hz"), ("window_size", "窗口"), ("window_overlap", "重叠"),
@@ -25,16 +26,17 @@ class TrainPage(Page):
         self.evaluate = button("留出评估", c.evaluate)
         self.load = button("加载模型包", c.load_bundle)
         self.export = button("导出模型包", c.export_bundle)
-        top.add(row(self.train, self.evaluate, self.load, self.export))
+        self.working = Busy("正在后台计算，界面可继续查看…")
+        top.add(row(self.train, self.evaluate, self.load, self.export, self.working))
         self.model_text = label(wrap=True, selectable=True)
         top.add(self.model_text)
         self.evaluation_text = label(tone="muted", wrap=True, selectable=True)
         top.add(self.evaluation_text)
 
-        band = self.add_section(band=True)
-        band.add(label("训练参数", "section"))
-        card = Card("分段预设", tone="white")
-        band.add(card)
+        more = self.add_section()
+        more.add(label("训练参数", "section"))
+        card = Card("分段预设")
+        more.add(card)
         self.impulse = button("短促动作 / 响指", lambda: c.apply_preset("impulse"))
         self.motion = button("连续动作", lambda: c.apply_preset("motion"))
         card.add(row(self.impulse, self.motion))
@@ -42,8 +44,8 @@ class TrainPage(Page):
         card.add(self.mode_text)
         card.add(label("响指、敲击等短促动作请先应用短促预设；挥手等选择连续动作。不同类型动作不要未经评估就混用同一预设。",
                        "caption", wrap=True))
-        fields = Card("模型与滤波", tone="white")
-        band.add(fields)
+        fields = Card("模型与滤波")
+        more.add(fields)
         grid = QGridLayout()
         grid.setHorizontalSpacing(20)
         grid.setVerticalSpacing(12)
@@ -76,6 +78,7 @@ class TrainPage(Page):
         else:
             state = "已失效" if c.stale else "可用"
         self.model_state.set_value(state)
+        self.working.set_busy(c.training)
         self.train.setEnabled(not c.locked)
         self.evaluate.setEnabled(not c.locked)
         self.load.setEnabled(not c.locked)

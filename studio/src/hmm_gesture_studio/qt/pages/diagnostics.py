@@ -34,10 +34,10 @@ class DiagnosticsPage(Page):
         self.status = label(role="caption", wrap=True)
         top.add(self.status)
 
-        band = self.add_section(band=True)
-        band.add(label("方向", "section"))
-        card = Card(tone="white")
-        band.add(card)
+        more = self.add_section()
+        more.add(label("方向", "section"))
+        card = Card()
+        more.add(card)
         dials = QHBoxLayout()
         self.dials = [DirectionDial(0, 1), DirectionDial(0, 2), DirectionDial(1, 2)]
         for dial in self.dials:
