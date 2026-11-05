@@ -32,6 +32,7 @@ CARD_PADDING = 28
 ELEMENT_GAP = 12
 CHART_HEIGHT = 500
 CAPTURE_CHART_HEIGHT = 420  # Both panels fit above the fold at the default window size.
+CONTRIBUTOR_TILE = 112  # QSS sizes beat setFixedSize, so this is set in the stylesheet.
 MOTION_FAST = 150  # ms: toggles and small state changes.
 MOTION = 220  # ms: navigation and panels.
 
@@ -78,6 +79,10 @@ QPushButton[kind="nav"] {{ text-align: left; font-size: 14px; font-weight: 500; 
   border-radius: 10px; padding: 0 12px; min-height: 36px; max-height: 36px; }}
 QPushButton[kind="nav"]:hover {{ background: rgba(0, 0, 0, 0.04); }}
 QPushButton[kind="nav"]:checked {{ background: transparent; font-weight: 600; }}
+QPushButton#contributor {{ background: transparent; border: none; border-radius: 14px; padding: 0;
+  min-width: {CONTRIBUTOR_TILE}px; max-width: {CONTRIBUTOR_TILE}px;
+  min-height: {CONTRIBUTOR_TILE}px; max-height: {CONTRIBUTOR_TILE}px; }}
+QPushButton#contributor:hover {{ background: {STUDIO_MIST}; }}
 QPushButton#deviceCard {{ text-align: left; background: {GALLERY_WHITE}; border: none; border-radius: 20px;
   min-height: 0; max-height: 16777215; padding: 0; }}
 QPushButton#deviceCard:hover {{ background: {PAPER_FROST}; }}

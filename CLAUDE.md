@@ -27,6 +27,10 @@ uv run --locked --all-packages python -m unittest discover -s tests -v
 - 对话框经 `dialogs` 注入。模态框会运行嵌套事件循环，**确认之后必须重新检查状态**，再操作文件或硬件。
 - `PySide6-Essentials` 约束为 `<6.12`：6.12 在 Python 3.10 上退出时崩溃（`free(): invalid size`）。放宽前要在 3.10 上验证退出码。
 
+### 联网
+
+应用只在打开“关于”页时访问 GitHub 公开接口（`qt/contributors.py`），不在启动时联网，也不发送设备或手势数据。响应视为不可信，只接受预期域名的 https 链接。测试不得访问真实 GitHub。
+
 ### 不能破坏的约束
 
 契约见 `studio/SPEC.md`。其中最容易被 UI 改动破坏的：
@@ -53,14 +57,14 @@ uv run --locked --all-packages python -m unittest discover -s tests -v
 
 | 项目 | DESIGN.md | Studio |
 |---|---|---|
-| 导航 | 顶部商店导航 | 左侧边栏：采集、训练、实时、诊断、录音、设备工具；底部是设备状态卡，点击进入设备页 |
+| 导航 | 顶部商店导航 | 左侧边栏：采集、训练、实时、诊断、录音、设备工具；底部是“关于”和设备状态卡，点击状态卡进入设备页 |
 | 页面标题 | 80px | 40px/600 |
 | 区块标题 / 卡片标题 | 40px | 24px/600，17px/600 |
 | 正文 / 说明 | 17px | 14px，12px |
 | 区块间距 | 90px | 40px |
 | 分区背景 | 白色与 `#f5f5f7` 通栏交替 | 全部白色，不用灰色通栏（实际观感突兀）；卡片为白底加 1px `#e6e6e8` 细线 |
 | 主角 | 产品图 | 实时图表和识别结果；关键数值用 `StatTile` |
-| 控件高度 | 紧凑 | 30px（QSS 圆角不能超过高度一半，否则失效） |
+| 控件高度 | 紧凑 | 30px（QSS 圆角不能超过高度一半，否则失效；QSS 的 `min/max-height` 会覆盖 `setFixedSize`，按钮尺寸要写在样式表里） |
 | 主题 | 浅色 | 只有浅色，不跟随系统深色模式 |
 | 字体 | SF Pro | 系统字体回退链（`theme.FONT_FAMILIES`）。SF Pro 不能随包分发，不打包字体 |
 

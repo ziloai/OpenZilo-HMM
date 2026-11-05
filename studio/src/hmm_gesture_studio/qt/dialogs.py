@@ -51,6 +51,10 @@ class QtDialogs:
     def directory(self, start) -> str:
         return QFileDialog.getExistingDirectory(self.parent, "选择目录", start)
 
+    def open_url(self, url) -> None:
+        if not QDesktopServices.openUrl(QUrl(url)):
+            raise OSError(f"无法打开：{url}")
+
     def open_path(self, path) -> None:
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             raise OSError(f"无法打开：{path}")
