@@ -4,170 +4,185 @@
 
 <h1 align="center">OpenZilo 手势训练平台与 Python 识别包</h1>
 
-<p align="center">在 GUI 中连接戒指、录制和训练手势，将模型导出给 Python 应用使用。</p>
+<p align="center">让 OpenZilo 戒指学会你的手势，并在自己的 Python 程序里识别它们。</p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="studio/README.md">训练平台</a> ·
-  <a href="docs/architecture.md">架构与导出格式</a> · <a href="docs/sdk.md">SDK 接入</a> ·
-  <a href="LICENSE">MPL-2.0</a>
+  <a href="README.md">English</a> · <a href="#快速开始">快速开始</a> ·
+  <a href="#使用流程">使用流程</a> · <a href="#在-python-中使用">Python API</a> ·
+  <a href="#文档">文档</a>
 </p>
 
-这是 OpenZilo 官方的自定义戒指手势训练参考项目，使用左到右 Gaussian HMM。项目分为两个**可独立安装的发行包**：
+在桌面应用里把手势录几遍，训练出模型，再导出成一个文件，Python 代码加载它就能识别。
 
-| 部分 | 位置 / Python 导入名 | 用途与依赖 |
+**录制 → 训练 → 实时试识别 → 导出 `*.gesture.json` → 在 Python 中识别**
+
+训练和识别都在电脑上运行，不刷固件，也不向戒指上传模型。
+
+| 发行包 | 用途 | 依赖 |
 | --- | --- | --- |
-| 训练平台 `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | 桌面 GUI（默认 PySide6，可用 `--ui legacy` 启动旧的 Tkinter 界面），实时六轴曲线、手势录制/训练/导出/试识别、戒指录音接收与下载；依赖识别包和官方 OpenZilo SDK |
-| 识别包 `hmm-gesture` | `src/hmm_gesture/` / `hmm_gesture` | 加载导出的模型，整段分类或流式分段识别；只依赖 NumPy、SciPy、hmmlearn，**不依赖 GUI、BLE 或训练平台** |
+| `hmm-gesture-studio` | 桌面应用：连接、录制、训练、试识别，以及戒指录音和设备工具 | OpenZilo SDK、PySide6、蓝牙 |
+| `hmm-gesture` | 加载导出的模型并识别手势 | 仅 NumPy、SciPy、hmmlearn |
 
-```mermaid
-flowchart LR
-    ring[OpenZilo 戒指] -->|BLE 六轴原始值| studio[训练平台 GUI]
-    data[JSON / CSV] --> studio
-    studio -->|录制、训练、导出| bundle["*.gesture.json"]
-    bundle --> runtime[Python 识别包]
-    input[应用提供的 IMU 数据] --> runtime
-    runtime --> result[手势名称 / 分数 / 置信度]
-```
+## 快速开始
 
-> 训练与识别均在电脑端运行。不刷固件，不向戒指上传模型，也不替换戒指内置的 `0x0702` 手势识别；使用的是 `0x0605` 原始 IMU 数据。
-
-## 快速开始：训练平台
-
-需要 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 Git。`.python-version` 将开发环境固定在 **Python 3.12**，两个包仍支持 Python 3.10+。
+需要 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Git 和图形桌面环境。两个包都支持 Python 3.10+。
 
 ```bash
 git clone https://github.com/ziloai/OpenZilo-HMM.git
 cd OpenZilo-HMM
 uv sync --locked --all-packages
 uv run --locked --all-packages hmm-gesture-studio
-# 或：uv run --locked --package hmm-gesture-studio python -m hmm_gesture_studio
 ```
 
-两个包由同一个 uv 工作区管理，共用 `.venv/` 和纳入版本控制的 `uv.lock`。`--all-packages` 安装两个包，无需手动创建或激活虚拟环境；`--locked` 检查依赖声明与锁文件一致。依赖统一维护在 `pyproject.toml` 中，不再单独维护 requirements 文件。
-
-默认的 PySide6 界面由 uv 安装；Linux 若提示缺少系统库，请执行 `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3`。启动旧的 Tkinter 界面请用 `uv run --locked --all-packages hmm-gesture-studio --ui legacy`。只有旧界面需要 Tkinter，它由 Python/操作系统提供，不是普通 Python 包依赖；Ubuntu/Debian 可安装 `python3-tk`，Homebrew Python 需匹配版本的 `python-tk`。必要时用 `uv sync --locked --all-packages --python /path/to/python3.12` 指定带 Tk 的解释器。需在有图形桌面的环境运行 GUI。
-
-### 在 GUI 中完成训练
-
-1. **连接戒指**：点击扫描并选择设备，或手动输入地址后连接。成功连接后保存到本机设备历史，下次直接从下拉框选择（可清空历史）。macOS 地址通常为 UUID。界面分别显示 BLE 连接与 IMU 上报状态；连接后查询能力并订阅 IMU，收到新数据才允许录制。新版固件无需按键切换手势模式。
-2. **录制**：输入手势名称，点击“开始一次录制”，做一次动作后停止，自动显示本次完整的滤波波形，可叠加原始数据、切换重复次数；自动裁剪漏检时可打开“手动框选”横向拖出训练框，也可恢复自动裁剪，原始数据不变。为拒识标定每类至少录制三次，建议五到十次以上，再“保存 / 追加”。默认每次至少 12 个样本；短录制只预览、不占用次数。保存到同名、同采样率数据时会询问是否追加，不静默覆盖。
-3. **管理数据**：选择工作目录（默认 `gestures/`），刷新、查看每个手势的重复数和长度，或导入 JSON / 多个 CSV。每个 CSV 是一次重复，无表头、六列原始整数值。未保存的录制可以撤销或清空；有未保存数据时锁定名称，避免误混入其他手势。可在列表中单选或多选，再点“删除选中手势”；确认后永久删除对应 JSON 及其全部录制，无法撤销。未保存录制和已导出的模型文件保留，当前训练模型需重新训练。
-4. **训练**：响指/敲击先点“应用短促动作 / 响指预设”，关闭容易抹掉尖峰的中值滤波，默认训练与实时识别使用同样的冲击前后窗口；其他动作可用连续动作预设。中值点数 `1` 表示关闭，低通必须小于采样率一半。后台训练包含标准化、方差正则化及拒识标定；每类至少 3 次。至少 4 次时可点“留出评估”；单类只报告正样本通过率，不代表误触率。参数或数据改变后需重新训练，详见 [Studio 说明](studio/README.md)。
-5. **导出**：将结果保存为 `*.gesture.json`，其中包含原始手势名称、HMM 参数、预处理配置和流式分段配置。使用端不需要再手动匹配这些参数。
-6. **试识别**：可使用当前模型或加载已导出模型，连接相同采样率戒指，开启“实时试识别”。先静止建立基线，手势结束后恢复静止。
-
-“实时六轴曲线”页分组显示加速度与陀螺仪；实时识别成功后，以紫色虚线框标注对应采样片段和手势名称。可冻结显示或清空曲线，不影响后台录制。录制间隙持续消费 IMU，避免积压旧数据。设备暂忙或停报时保留 BLE 连接并重试上报；真正掉线时自动退避重连。间断会取消未完成的手势，已完成的重复仍可保存。退出前尝试停止上报并断开设备，手动断开会终止重连。GUI 不配置硬件采样率。
-
-新增“加速度诊断”页：实时显示三轴合加速度（raw / g / m/s²）、传感器坐标系下的单位方向与夹角、方向投影和模长曲线，提供相对 1g 的幅值参考范围。数据**包含重力**，不能当作移动方向或固件校准结果；详见 [计算口径与验证边界](studio/README.md#加速度方向与合加速度诊断)。
-
-BLE 需要蓝牙适配器和权限，Linux 需要 BlueZ；macOS 需要允许终端/IDE 使用蓝牙。手势功能无需 `ffmpeg`，戒指录音转 WAV 需要系统安装 `ffmpeg`；未安装时仍可保存原始 `.bin`。当前接入基于 SDK **0.6.2**（含 `pcm` extra），增强功能固件基线为 **`V2.001.0002.0001`**；按设备能力开放入口，实际行为仍需真机确认。SDK 固定提交见 [`studio/pyproject.toml`](studio/pyproject.toml)。
-
-## 戒指录音接收与下载
-
-“戒指录音”页支持**远程开始/停止录音**，可设置声道、码率、左右数字增益和时长；确认设备保存完成后下载。自动接收识别物理按键录音的保存通知并下载，也可按历史索引补下载。文件解码失败仍保留原始 `.bin`，不自动删除设备文件。
-
-**实时 PCM 接收并保存**先订阅再启动录音，同时保留戒指副本，只有收到完整结束事件才保存 WAV。开始前可勾选默认关闭的**边接收边播放（仅实时 PCM）**，通过电脑默认音频输出监听，接收期间不可切换；建议使用耳机避免啸叫。播放故障只警告，不影响录音接收与保存。实际音频操作暂停 IMU，自动监听待机不阻塞手势数据。
-
-新增 **“校准与固件”** 页：加速度六面/陀螺仪静止校准向导、独立校准诊断、签名 OTA。校准不改变手势模型的原始输入。OTA 需独立可信公钥、离线验签和二次确认，升级完成或超时前禁用其他设备操作及普通退出；传输 100% 不代表安装成功。详见 [Studio 使用说明](studio/README.md) 与 [SDK 接入说明](docs/sdk.md)。
-
-## 不连接硬件先试一下
-
-在 GUI 选择 `sample_data/` 作为数据目录并训练，或使用新的命令行：
+**手边没有戒指？** 可以用仓库自带的示例数据训练，共六类手势，每类五次，采样率 25 Hz：
 
 ```bash
 uv run --locked --package hmm-gesture-studio hmm-gesture-train --data sample_data --output exports/demo.gesture.json
 uv run --locked python examples/recognize_export.py --bundle exports/demo.gesture.json --input "sample_data/向上.json"
 ```
 
-示例包含六类手势（打响指、甩手、向上、向下、向左、向右），每类五次，采样率 25 Hz。示例旧 JSON 缺失采样率时按 25 Hz 解释。训练后识别同一批数据只能验证流程，**不是独立准确率评测**。
+这里识别的是训练用过的数据，只能说明流程跑得通，不代表准确率。
 
-## 在自己的 Python 程序中使用
+<details>
+<summary>运行环境要求</summary>
 
-在仓库根目录运行 `uv sync --locked`，只安装识别包及数值计算依赖（会从共用环境中移除 Studio / BLE 依赖）。如果在另一个 uv 应用中使用，请在该应用目录运行：
+- **蓝牙：** 需要可用的适配器和蓝牙权限（Linux 使用 BlueZ；macOS 需允许终端或 IDE 使用蓝牙）。
+- **Linux 的 Qt 系统库：** 如果提示缺少系统库，运行 `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3`。
+- **音频：** 把戒指上的录音文件解码成 WAV 需要系统安装 `ffmpeg`；没有安装时仍会保存原始 `.bin`。手势功能不需要它。
+- **固件：** 增强功能的固件基线是 `V2.001.0002.0001`。Studio 按连接的戒指上报的能力开放功能。
+
+</details>
+
+## 使用流程
+
+### 1. 连接戒指
+
+扫描并选择戒指，或者直接输入地址，再点“连接”。连接过的戒指会被记住。收到新的运动数据后才能开始录制，不需要切换手势模式。
+
+<img src="docs/assets/ui/device.png" alt="设备页：可用设备列表" width="800">
+
+### 2. 录制手势
+
+输入名称，点“开始一次录制”，做一次动作后停止。每类至少录 3 次，建议 5–10 次以上，然后点“保存 / 追加”。
+
+每次录制后都会显示波形。如果自动裁剪没框住动作，可以打开“手动框选”，在图上横向拖动来标记。这只是添加标注，不改变原始录制。
+
+导入已有的 JSON、CSV 录制和删除已保存的手势也在这一页。
+
+<img src="docs/assets/ui/get.png" alt="采集页：录制波形与手动训练窗口" width="800">
+
+### 3. 训练
+
+按手势类型选择预设，再点“训练全部数据”：
+
+- **短促动作 / 响指：** 响指、敲击等短暂的冲击
+- **连续动作：** 挥手等持续时间较长的动作
+
+每类至少有 4 次录制时，可以用“留出评估”在未参与训练的录制上测试。数据或参数改变后，模型会失效，需要重新训练。
+
+<img src="docs/assets/ui/train.png" alt="训练页：数据统计与模型参数" width="800">
+
+### 4. 实时试识别
+
+打开“实时试识别”。先保持静止，每次手势后也恢复静止。识别到的手势会在图上框出，并标注名称和置信度。
+
+也要做些日常动作，看看哪些会误触发。训练只见过你的手势样本，不能保证其他动作都被拒识。
+
+<img src="docs/assets/ui/realtime.png" alt="实时页：图上框出识别到的 up 和 down 手势" width="800">
+
+### 5. 导出
+
+在训练页点“导出模型包”，保存为 `*.gesture.json`。文件里包含手势名称、模型参数以及滤波和分段设置，应用端无需重新配置。
+
+## Studio 的其他工具
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/ui/record.png" alt="戒指录音页"><br>
+      <b>录音</b><br>
+      远程录音，实时接收 PCM 并可选边收边听，自动下载用戒指按键录制的音频，或从戒指历史记录下载。
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/ui/tools.png" alt="设备工具页"><br>
+      <b>设备工具</b><br>
+      引导式 IMU 校准和签名固件升级。校准结果只保存在电脑上，不影响手势数据。固件升级需要另行取得可信公钥；发送到 100% 不代表已安装成功。
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/assets/ui/about.png" alt="关于页"><br>
+      <b>关于</b><br>
+      显示版本、仓库和贡献者。应用只在打开这一页时访问 GitHub，不发送设备或手势数据。
+    </td>
+    <td valign="top">
+      <b>诊断</b><br>
+      实时显示合加速度的大小和方向。读数<b>包含重力</b>，不代表移动方向。详见<a href="studio/README.md#加速度方向与合加速度诊断">计算方式</a>。
+    </td>
+  </tr>
+</table>
+
+## 在 Python 中使用
+
+把识别包添加到你的项目。它不会安装 Studio、Qt 或蓝牙 SDK：
 
 ```bash
 uv add /path/to/OpenZilo-HMM
 ```
 
-也可以在本仓库构建独立 wheel，再交付给使用端：
-
-```bash
-uv build --package hmm-gesture --wheel
-# 在使用端项目中：
-uv add /path/to/OpenZilo-HMM/dist/hmm_gesture-0.2.0-py3-none-any.whl
-```
-
-以下代码中的 `samples` 是一整次手势的 `(N, 6)` 原始 IMU 数据：
+识别一次完整的手势，其中 `samples` 是 `(N, 6)` 的数组：
 
 ```python
 from hmm_gesture import GestureRecognizer
 
-recognizer = GestureRecognizer.load("demo.gesture.json", min_confidence=0.0)
+recognizer = GestureRecognizer.load("demo.gesture.json")
 print(recognizer.gesture_names, recognizer.sample_rate_hz)
 
 result = recognizer.predict(samples, sample_rate_hz=25)
-if result is not None:
+if result is not None:  # None 表示数据过短或被拒识
     print(result.name, result.confidence, result.score)
 ```
 
-也可以由应用自行提供连续数据，例如 SDK、串口、网络或文件：
+也可以输入来自任意来源的连续数据，例如 SDK、串口、网络或文件：
 
 ```python
-# batch: 若干行 [ax, ay, az, gx, gy, gz]
-for result in recognizer.feed(batch, sample_rate_hz=25):
+for result in recognizer.feed(batch, sample_rate_hz=25):  # 一批数据可能返回多个手势
     print(result.name, result.confidence)
 
-recognizer.reset()  # 断连、重新佩戴或开始新数据流时重置分段和基线
+recognizer.reset()  # 断线重连或重新佩戴后调用
 ```
 
-`feed()` 返回通过检查的所有完整手势，一个批次可能有多个。`predict()` 在连续模式对整段分类；短促模式使用与流式一致的自动窗口，仅接受恰好一个完整事件；手动训练框不覆盖推理的触发规则。过短或拒识时返回 `None`。导出文件使用带版本的 JSON 数值参数，加载不执行 pickle。详见 [API 与格式说明](docs/architecture.md)。
+### 使用识别结果前请注意
 
-### 数据与识别边界
+- **输入格式：** 列顺序为 `ax, ay, az, gx, gy, gz`，单位是原始 int16，不是 g 或 °/s。
+- **与训练条件保持一致：** `sample_rate_hz` 只用于检查，不会重采样，也不会配置戒指。采样率、量程和佩戴方式都要与训练时相同。
+- **置信度不是概率：** 它只是相对分数，单类模型的置信度为 `None`。
+- **单类模型：** 没有拒识标定时调用 `feed()` 会报错；训练时至少需要 3 次录制才能标定。
+- **评估准确率：** 使用另一次会话的录制，并加入不属于这些手势的动作。
+- **一条数据流一个识别器：** 识别器有内部状态，不要在多个线程或设备间共用。
 
-- 轴顺序固定为 **`ax, ay, az, gx, gy, gz`**，单位为原始有符号 int16 值，不是 g 或度/秒。包会检查形状、有限值和范围。
-- 采样率参数用于检查，不改变设备采样率，也不自动重采样。应用需保持佩戴方向、原始单位、量程与训练时一致。
-- v1/默认 API 保留基线能量分段（阈值 1500，最短 12 帧、最长 125 帧）；Studio 新训练按采样率换算时长，并可选短促冲击模式。流结束时不强行分类未完成动作。
-- 置信度是最优与次优 HMM 分数差的经验指标，**不是概率**。单模型 `confidence=None`，不再伪造固定 0.8；无拒识标定的单类模型调用非空 `feed()` 会报错，请至少用 3 次录制重新训练标定。
-- v2 导出包含新增滤波/分段/拒识设置；v1 仍可读取并保留原离线分数。拒识依赖正样本分数、强度和长度，不保证可靠排除所有未知动作，需补充负样本及独立会话评测。
-- 一份识别器维护一条流的状态，不应在多个线程/设备间共享。用独立录制的数据评测实际效果。
+## 文档
 
-## 原命令行兼容
+| 主题 | 文档 |
+| --- | --- |
+| Studio 详解：短促动作、拒识、录音、校准、固件升级 | [studio/README.md](studio/README.md) |
+| 完整 API 与导出格式 | [docs/architecture.md](docs/architecture.md) |
+| SDK 接入与固件契约 | [docs/sdk.md](docs/sdk.md) |
 
-安装两个包后，原入口仍可用：
+## 旧版工具
 
-```bash
-uv run --locked --all-packages python record_gesture.py --name snap --ring --address "设备地址" --reps 5
-uv run --locked --all-packages python train_hmm.py --data sample_data --output models
-uv run --locked --all-packages python recognize.py --models models --input "sample_data/向左.json"
-```
+- **Tkinter 界面：** `uv run --locked --all-packages hmm-gesture-studio --ui legacy`，需要带 Tkinter 的 Python。
+- **命令行脚本：** `record_gesture.py`、`train_hmm.py`、`recognize.py` 仍可使用。它们使用 `.pkl` 模型，Studio 和 `hmm-gesture` 不导入这种格式；要得到 `*.gesture.json`，请用 JSON 录制重新训练。**只加载可信的 pickle 文件**，因为加载时可能执行代码。`record_gesture.py` 会覆盖同名录制。
 
-旧训练命令继续输出 `.pkl`，旧识别入口保留读取功能。**只加载可信 pickle**，反序列化可能执行代码。旧模型缺少预处理参数，新包/GUI 不直接导入它们；请用 `sample_data/` 或自己的 JSON 重新训练导出。旧录制 CLI 的同名保存仍为覆盖；GUI 的保存则有追加确认。
-
-## 目录与开发
-
-```text
-pyproject.toml               识别包打包配置与 uv 工作区
-uv.lock                      共享依赖锁文件，纳入版本控制
-.python-version              开发 Python 版本（3.12）
-src/hmm_gesture/              配置、预处理、模型格式、分段与推理 API
-studio/pyproject.toml         训练平台的独立打包配置与 SDK 依赖
-studio/src/hmm_gesture_studio/ GUI、数据集、训练、BLE 后台服务
-examples/recognize_export.py  无 GUI/SDK 的使用示例
-sample_data/                 训练示例 JSON
-pretrained_models/           保留的旧版 pickle 示例
-record_gesture.py 等          原命令行兼容入口
-tests/                       推理、导出、GUI 控制逻辑和 SDK mock 测试
-```
+## 开发
 
 ```bash
 uv run --locked --all-packages python -m unittest discover -s tests -v
 uv build --all-packages --wheel
 ```
 
-添加识别包依赖使用 `uv add 包名`，仅训练平台需要的依赖使用 `uv add --package hmm-gesture-studio 包名`；提交时一并提交对应的 `pyproject.toml` 和 `uv.lock`。手动修改依赖声明后，运行 `uv lock`，再运行 `uv sync --locked --all-packages`。升级某个依赖可用 `uv lock --upgrade-package 包名`，随后同步并测试。
-
-自动测试不访问真实 BLE；界面与设备需在目标平台上联调。升级 SDK 时需同时核对 [SDK 接入文档](docs/sdk.md) 和固定提交。问题反馈：[GitHub Issues](https://github.com/ziloai/OpenZilo-HMM/issues)。
+修改依赖时，请同时提交 `uv.lock`。测试不使用真实蓝牙硬件，设备行为需要在真实戒指上验证。问题反馈请到 [GitHub Issues](https://github.com/ziloai/OpenZilo-HMM/issues)。
 
 ## 许可证
 
-软件、文档、示例数据、预训练模型及随附素材采用 [MPL-2.0](LICENSE)，与 OpenZilo 软件许可一致；示例数据、模型和图片已获授权再分发。第三方依赖保留各自许可证，品牌与商标属于其权利人。详见 [NOTICE.md](NOTICE.md)。
+采用 [MPL-2.0](LICENSE)，涵盖软件、文档、示例数据、预训练模型和随附素材。依赖和商标说明见 [NOTICE.md](NOTICE.md)。
