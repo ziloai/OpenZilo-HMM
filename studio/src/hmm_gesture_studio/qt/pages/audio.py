@@ -20,7 +20,7 @@ class AudioPage(Page):
         super().__init__(controller, navigate)
         c, t = controller, controller.tools
         top = self.add_section()
-        self.header(top, "戒指录音", "四种音频操作不能并行；音频期间暂停 IMU，结束后恢复。")
+        self.header(top, "戒指录音", "四种音频操作不能并行；录音和传输期间 IMU 持续上报，不会中断。")
         self.notice = DeviceNotice(self, "尚未连接戒指。")
         top.add(self.notice)
         self.state = label(wrap=True)
@@ -58,7 +58,7 @@ class AudioPage(Page):
         more.add(label("接收与下载", "section"))
         notify = Card("保存通知监听")
         more.add(notify)
-        notify.add(label("戒指录音保存后，按通知索引自动下载。待机监听不阻塞手势，传输时暂停 IMU。"
+        notify.add(label("戒指录音保存后，按通知索引自动下载。监听和传输都不中断 IMU。"
                          "保留原始音频并解码 WAV；若漏收或中断，可查询历史录音重新下载。", "caption", wrap=True))
         self.start = button("开启保存通知监听", c.start_audio)
         self.stop = button("停止接收 / 下载", c.stop_audio)
