@@ -22,12 +22,15 @@ import numpy as np
 from hmm_gesture_studio.datasets import GestureDataset, load_dataset, save_dataset
 from hmm_gesture_studio.device_history import DeviceHistory
 from hmm_gesture_studio.qt.controller import StudioController
-from hmm_gesture_studio.qt import theme
+from hmm_gesture_studio.qt import contributors, theme
 from hmm_gesture_studio.qt.charts import LiveImuChart
 from hmm_gesture_studio.qt.motion import CrossFade
 from hmm_gesture_studio.qt.theme import apply_theme
 from hmm_gesture_studio.qt.widgets import Switch
 from hmm_gesture_studio.qt.window import LOG_HEIGHT, MainWindow, NAV
+
+# The about page fetches when shown; tests must never reach the real GitHub.
+contributors.API_URL = "http://127.0.0.1:9/contributors"
 
 CAPABILITIES = dict(recording_control=True, live_audio=True, audio_files=True, imu=True, ota=True)
 ACTIVE = dict(state="active", message="IMU 正常上报", sample_rate_hz=25.0, accel_range_g=8, gyro_range_dps=2000)

@@ -13,6 +13,7 @@ from . import theme
 from .controller import StudioController
 from .dialogs import QtDialogs
 from .motion import CrossFade
+from .pages.about import AboutPage
 from .pages.audio import AudioPage
 from .pages.capture import CapturePage
 from .pages.device import DevicePage
@@ -226,7 +227,7 @@ class MainWindow(QMainWindow):
         self.pages = {}
         for name, page_class in (("capture", CapturePage), ("train", TrainPage), ("live", LivePage),
                                  ("diagnostics", DiagnosticsPage), ("audio", AudioPage), ("tools", ToolsPage),
-                                 ("device", DevicePage)):
+                                 ("device", DevicePage), ("about", AboutPage)):
             page = page_class(self.controller, self.navigate)
             self.pages[name] = page
             self.stack.addWidget(page)
@@ -265,6 +266,12 @@ class MainWindow(QMainWindow):
             self.nav_buttons[name] = item
             layout.addWidget(item)
         layout.addStretch(1)
+        about = button("关于", lambda: self.navigate("about"), kind="nav")
+        about.setCheckable(True)
+        self.nav_group.addButton(about)
+        self.nav_buttons["about"] = about
+        layout.addWidget(about)
+        layout.addSpacing(10)
         self.device_card = DeviceCard(lambda: self.navigate("device"))
         layout.addWidget(self.device_card)
         return sidebar

@@ -1148,6 +1148,12 @@ class StudioController(QObject):
         except (OSError, ValueError) as exc:
             self.error(str(exc))
 
+    def open_url(self, url):
+        try:
+            self.dialogs.open_url(url)
+        except OSError as exc:
+            self.error(str(exc))
+
     def _clear_remote_audio(self):
         self.remote_audio_files = {}
         self.remote_audio_selected = ""
