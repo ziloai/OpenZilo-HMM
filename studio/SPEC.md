@@ -12,7 +12,7 @@ Studio 管理 OpenZilo 连接、原始手势采集和训练，以及远程录音
 
 ## Boundary
 
-独立 `hmm-gesture` 推理包不依赖 SDK、BLE、Tk、PyAV 或加密库。Tk 仅在主线程更新；BLE 与设备操作在单独 asyncio worker 中运行，文件转换不占用 Tk/BLE 线程。应用层不复制 SDK 编解码或签名验证实现。
+独立 `hmm-gesture` 推理包不依赖 SDK、BLE、Qt、Tk、PyAV 或加密库。默认界面为 PySide6（`qt/`），旧 Tk 界面保留，由 `launcher.py` 选择；两者遵守同一份契约，下文的“Tk”同样适用于 Qt 主线程。界面仅在主线程更新；BLE 与设备操作在单独 asyncio worker 中运行，文件转换不占用界面/BLE 线程。应用层不复制 SDK 编解码或签名验证实现。
 
 ## 数据契约
 

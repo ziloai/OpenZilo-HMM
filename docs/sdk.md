@@ -4,7 +4,7 @@
 
 ## Dependency / 依赖
 
-Studio uses official **OpenZilo 0.6.2**, pinned to [`37928a8a65a4ca98be8b8d2be3300ad7f624004e`](https://github.com/ziloai/OpenZilo/commit/37928a8a65a4ca98be8b8d2be3300ad7f624004e) with the `pcm` extra. Only this SDK revision is supported; there is no older-SDK compatibility layer. The SDK supplies Bleak, cryptography and PyAV. `hmm-gesture` remains independent of BLE, SDK, Tk and audio dependencies.
+Studio uses official **OpenZilo 0.6.2**, pinned to [`37928a8a65a4ca98be8b8d2be3300ad7f624004e`](https://github.com/ziloai/OpenZilo/commit/37928a8a65a4ca98be8b8d2be3300ad7f624004e) with the `pcm` extra. Only this SDK revision is supported; there is no older-SDK compatibility layer. The SDK supplies Bleak, cryptography and PyAV. `hmm-gesture` remains independent of BLE, SDK, Qt, Tk and audio dependencies.
 
 Studio 固定上述提交及 `pcm` extra，只适配新版 SDK。PyAV 用于进程内实时 PCM 解码；签名固件验证使用 SDK 的 cryptography 依赖。独立识别包仍不依赖这些组件。
 

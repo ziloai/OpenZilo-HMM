@@ -16,7 +16,7 @@ An official OpenZilo reference project for custom ring gestures using left-to-ri
 
 | Component | Location / import | Responsibility |
 | --- | --- | --- |
-| `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | Tkinter GUI for live six-axis charts, gesture recording/training/export, live testing, and receiving/downloading ring recordings. Depends on the runtime and official OpenZilo SDK. |
+| `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | Desktop GUI (PySide6, with the older Tkinter interface available via `--ui legacy`) for live six-axis charts, gesture recording/training/export, live testing, and receiving/downloading ring recordings. Depends on the runtime and official OpenZilo SDK. |
 | `hmm-gesture` | `src/hmm_gesture/` / `hmm_gesture` | Load exported gestures and classify complete segments or continuous batches. Depends only on NumPy, SciPy and hmmlearn; **no GUI, Bluetooth SDK or Studio dependency**. |
 
 ```mermaid
@@ -33,7 +33,7 @@ flowchart LR
 
 ## Install and launch Studio
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Git and a Python installation with Tkinter. `.python-version` selects Python **3.12** for development; both packages still support Python 3.10+.
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git. `.python-version` selects Python **3.12** for development; both packages still support Python 3.10+.
 
 ```bash
 git clone https://github.com/ziloai/OpenZilo-HMM.git
@@ -45,7 +45,7 @@ uv run --locked --all-packages hmm-gesture-studio
 
 The two packages form one uv workspace, sharing `.venv/` and the checked-in `uv.lock`. `--all-packages` installs both; no manual environment activation is needed. `--locked` verifies that dependency declarations match the lockfile. Dependencies are maintained in `pyproject.toml`, not a separate requirements file.
 
-Tkinter comes from your Python/OS installation, not a Python package dependency. On Debian/Ubuntu install `python3-tk`; Homebrew Python requires the matching `python-tk` version. If necessary, select a Tk-enabled interpreter with `uv sync --locked --all-packages --python /path/to/python3.12`. Run the GUI in a graphical desktop session. The interface currently uses Chinese labels.
+uv installs the default PySide6 interface. On Linux, if Qt reports a missing system library, run `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3`. To start the older Tkinter interface, run `uv run --locked --all-packages hmm-gesture-studio --ui legacy`. Only that interface needs Tkinter, which comes from your Python/OS installation, not a Python package dependency: on Debian/Ubuntu install `python3-tk`; Homebrew Python requires the matching `python-tk` version. If necessary, select a Tk-enabled interpreter with `uv sync --locked --all-packages --python /path/to/python3.12`. Run the GUI in a graphical desktop session. The interface currently uses Chinese labels.
 
 ### Recording, training and export
 

@@ -13,11 +13,14 @@ license-files = ["LICENSE"]
 dependencies = [
   "hmm-gesture==0.2.0",
   "sounddevice>=0.5,<0.6",
+  "PySide6-Essentials>=6.8,<6.12",  # 6.12 aborts at exit on Python 3.10
+  "pyqtgraph>=0.13.7,<0.15",
   "OpenZilo[pcm] @ git+https://github.com/ziloai/OpenZilo.git@37928a8a65a4ca98be8b8d2be3300ad7f624004e",
 ]
 
 [project.scripts]
-hmm-gesture-studio = "hmm_gesture_studio.gui:main"
+hmm-gesture-studio = "hmm_gesture_studio.launcher:main"
+hmm-gesture-studio-legacy = "hmm_gesture_studio.gui:main"
 hmm-gesture-train = "hmm_gesture_studio.training:main"
 
 [tool.uv.sources]

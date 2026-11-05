@@ -1,6 +1,8 @@
 # HMM Gesture Studio / 手势训练平台
 
-独立于推理包的 Tkinter 桌面应用：扫描/连接 OpenZilo 戒指，显示实时六轴曲线、录制手势、导入 JSON/CSV、训练、导出和试识别，也可接收/下载戒指录音。使用 uv 管理环境与依赖，需要 Python 3.10+、Tkinter、Git 和蓝牙权限；新版固件通过订阅启动 IMU，无需切换模式；新增功能按连接时查询到的设备能力开放。
+独立于推理包的桌面应用：扫描/连接 OpenZilo 戒指，显示实时六轴曲线、录制手势、导入 JSON/CSV、训练、导出和试识别，也可接收/下载戒指录音。使用 uv 管理环境与依赖，需要 Python 3.10+、Git 和蓝牙权限；新版固件通过订阅启动 IMU，无需切换模式；新增功能按连接时查询到的设备能力开放。
+
+默认启动基于 PySide6 的新界面。旧的 Tkinter 界面仍然保留，功能相同，可用 `--ui legacy` 启动。
 
 从仓库根目录安装和启动：
 
@@ -8,11 +10,33 @@
 uv sync --locked --all-packages
 uv run --locked --all-packages hmm-gesture-studio
 # 或 uv run --locked --package hmm-gesture-studio python -m hmm_gesture_studio
+
+# 启动旧界面（需要带 Tkinter 的 Python）
+uv run --locked --all-packages hmm-gesture-studio --ui legacy
+# 或 uv run --locked --all-packages hmm-gesture-studio-legacy
 ```
 
 工作区共用根目录的 `uv.lock` 和 `.venv/`，默认开发解释器为 Python 3.12，无需手动激活环境。在 `studio/` 目录内也可直接运行 `uv run --locked hmm-gesture-studio`，但默认数据目录相对于当前工作目录。
 
-Linux 可能需要 `sudo apt install python3-tk`；macOS 请使用带 Tk 的 Python，Homebrew Python 需安装匹配版本的 `python-tk`。Tkinter 由 Python/系统提供，不能用 `uv add` 安装；可用 `uv sync --locked --all-packages --python /path/to/python3.12` 选择解释器。
+新界面的 PySide6 和 pyqtgraph 由 uv 安装。Linux 若提示缺少系统库，请执行 `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3`。
+
+只有旧界面需要 Tkinter：Linux 可能需要 `sudo apt install python3-tk`；macOS 请使用带 Tk 的 Python，Homebrew Python 需安装匹配版本的 `python-tk`。Tkinter 由 Python/系统提供，不能用 `uv add` 安装；可用 `uv sync --locked --all-packages --python /path/to/python3.12` 选择解释器。
+
+## 界面对照
+
+下文沿用旧界面的页面名称。两套界面的功能和数据目录相同，对应关系如下：
+
+| 旧界面 | 新界面 |
+| --- | --- |
+| 设备连接区 | 侧边栏底部的设备卡 → “设备”页 |
+| 手势录制与训练 | “采集”页（录制、数据集）、“训练”页（参数、训练、导出） |
+| 实时六轴曲线 | “采集”页的“实时曲线”，以及“实时”页 |
+| 实时试识别开关 | “实时”页 |
+| 录制波形（滤波后） | “采集”页的“录制波形” |
+| 加速度诊断 | “诊断”页 |
+| 戒指录音 | “录音”页 |
+| 校准与固件 | “设备工具”页 |
+| 日志 | 窗口底部的日志栏，点击“显示日志”展开 |
 
 ## 使用流程
 
