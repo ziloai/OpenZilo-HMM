@@ -118,6 +118,7 @@ On the training page, click 导出模型包 (Export model) to save a `*.gesture.
       Shows versions, repositories and contributors. Opening this page is the only time the app contacts GitHub, and it sends no device or gesture data.
     </td>
     <td valign="top">
+      <img src="docs/assets/ui/diagnostics.png" alt="Diagnostics page with the acceleration magnitude chart"><br>
       <b>诊断 (Diagnostics)</b><br>
       Shows acceleration magnitude and direction in real time. Readings <b>include gravity</b>, so they don't show movement direction. See <a href="studio/README.md#加速度方向与合加速度诊断">how they're calculated</a>.
     </td>
