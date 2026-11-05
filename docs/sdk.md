@@ -56,9 +56,9 @@ asyncio.run(main())
 
 Studio has one BLE owner thread. SDK 0.6.2 owns fragmented-write and per-response request locks; Studio must not reacquire the same write lock around `super().send_command()`. The thin client observer tracks extraction indices using network byte order and completes in-flight writes before cancelling. Studio still uses the pinned client's private receive queues for bounded queue housekeeping; only a few wire IDs are local constants, not private SDK imports or a copied protocol implementation.
 
-The IMU owner pauses before audio operations and maintenance, then restarts with a fresh segment. Calibration owns its own IMU stream and never emits model-input `samples`. OTA owns the entire connection, including reboot/reconnect; normal housekeeping must not interpret its expected reboot as link failure. In-flight battery requests finish before maintenance starts; new telemetry is deferred. An OTA attempt ends the Studio session without automatic retry; reconnect explicitly after checking the result.
+Audio operations run alongside the IMU consumer and do not stop, resubscribe or drain the IMU stream. The IMU owner pauses only before maintenance (calibration, diagnostics and OTA), then restarts with a fresh segment. Calibration owns its own IMU stream and never emits model-input `samples`. OTA owns the entire connection, including reboot/reconnect; normal housekeeping must not interpret its expected reboot as link failure. In-flight battery requests finish before maintenance starts; new telemetry is deferred. An OTA attempt ends the Studio session without automatic retry; reconnect explicitly after checking the result.
 
-自动监听同时识别 `0x050A` 保存结果与音频帧；新版通知通过 SDK 下载文件，不把保存通知当作音频数据。监听待机不阻塞 IMU；实际接收、查询、下载与 IMU 串行。中断传输不能报告为完整录音，稍后按索引补下载。原始文件先保存，转换在后台线程执行，文件名本机生成且不覆盖现有文件。
+自动监听同时识别 `0x050A` 保存结果与音频帧；新版通知通过 SDK 下载文件，不把保存通知当作音频数据。监听待机与实际接收、查询、下载都不中断 IMU；音频操作之间仍串行。中断传输不能报告为完整录音，稍后按索引补下载。原始文件先保存，转换在后台线程执行，文件名本机生成且不覆盖现有文件。
 
 ## New device tools / 新设备工具
 
