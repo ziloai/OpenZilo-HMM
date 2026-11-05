@@ -116,6 +116,7 @@ uv run --locked python examples/recognize_export.py --bundle exports/demo.gestur
       显示版本、仓库和贡献者。应用只在打开这一页时访问 GitHub，不发送设备或手势数据。
     </td>
     <td valign="top">
+      <img src="docs/assets/ui/diagnostics.png" alt="诊断页：合加速度曲线"><br>
       <b>诊断</b><br>
       实时显示合加速度的大小和方向。读数<b>包含重力</b>，不代表移动方向。详见<a href="studio/README.md#加速度方向与合加速度诊断">计算方式</a>。
     </td>
