@@ -493,7 +493,7 @@ requires-dist = [
     { name = "hmm-gesture", editable = "." },
     { name = "openzilo", extras = ["pcm"], git = "https://github.com/ziloai/OpenZilo.git?rev=37928a8a65a4ca98be8b8d2be3300ad7f624004e" },
     { name = "pyqtgraph", specifier = ">=0.13.7,<0.15" },
-    { name = "pyside6-essentials", specifier = ">=6.8,<6.12" },
+    { name = "pyside6-essentials", specifier = ">=6.9,<6.12" },
     { name = "sounddevice", specifier = ">=0.5,<0.6" },
 ]
 

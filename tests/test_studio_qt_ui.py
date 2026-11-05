@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
@@ -483,6 +483,52 @@ class WindowTests(unittest.TestCase):
             self.c.notify()
             self.assertEqual(page._result_motion.state(), QVariantAnimation.State.Running)
         self.assertEqual(page.result.text(), "甲")
+
+    def test_title_bar_is_only_merged_when_requested(self):
+        self.assertFalse(self.win.windowFlags() & Qt.WindowType.ExpandedClientAreaHint)
+        self.assertEqual(self.win.windowTitle(), "OpenZilo 手势与录音工作室")
+        self.assertFalse(self.win.sidebar_title_area.isVisible())
+        merged = MainWindow(controller=self.c, merge_title_bar=True)
+        self.addCleanup(merged.deleteLater)
+        flags = merged.windowFlags()
+        self.assertTrue(flags & Qt.WindowType.ExpandedClientAreaHint)
+        self.assertTrue(flags & Qt.WindowType.NoTitleBarBackgroundHint)
+        self.assertEqual(merged.windowTitle(), "")
+
+    def test_title_bar_inset_moves_content_below_traffic_lights_and_back(self):
+        win = self.win
+        win.navigate("capture")
+        self.pump()
+        before = win.nav_buttons["capture"].y()
+        stack_before = win.stack.y()
+        sidebar_before = win.sidebar.y()
+        win.set_title_bar_inset(28)
+        self.pump()
+        self.assertEqual(win.sidebar.y(), sidebar_before, "the sidebar background reaches the top edge")
+        self.assertEqual(win.sidebar_title_area.height(), 28)
+        self.assertEqual(win.stack.y(), stack_before + 28, "scrolling content stays clear of the title bar")
+        self.assertGreater(win.nav_buttons["capture"].y(), before)
+        self.assertEqual(win.nav_indicator.geometry(), win.nav_buttons["capture"].geometry())
+        win.set_title_bar_inset(0)  # For example, entering full screen.
+        self.pump()
+        self.assertFalse(win.sidebar_title_area.isVisible())
+        self.assertEqual(win.stack.y(), stack_before)
+        self.assertEqual(win.nav_buttons["capture"].y(), before)
+
+    def test_title_bar_area_moves_and_zooms_the_window(self):
+        win = self.win
+        win.set_title_bar_inset(28)
+        self.pump()
+        area = win.content_title_area
+        with patch.object(win.windowHandle().__class__, "startSystemMove") as move:
+            QTest.mousePress(area, Qt.MouseButton.RightButton)
+            move.assert_not_called()
+            QTest.mousePress(area, Qt.MouseButton.LeftButton)
+            move.assert_called_once()
+        QTest.mouseDClick(area, Qt.MouseButton.LeftButton)
+        self.assertTrue(win.isMaximized())
+        QTest.mouseDClick(area, Qt.MouseButton.LeftButton)
+        self.assertFalse(win.isMaximized())
 
     def test_every_page_fits_minimum_window_width(self):
         self.win.resize(1100, 720)
