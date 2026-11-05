@@ -6,7 +6,7 @@
 
 - 根目录 `pyproject.toml` 构建 `hmm-gesture`，只打包 `src/hmm_gesture/`。生产应用仅安装这个包即可。
 - `studio/pyproject.toml` 构建 `hmm-gesture-studio`，只打包 `studio/src/hmm_gesture_studio/`，单向依赖同版本的识别包及固定提交的官方 SDK。
-- GUI 使用 Python 自带的 Tkinter。它不是识别包的依赖；导入 `hmm_gesture` 不加载 Tk、OpenZilo、Bleak 或训练平台。
+- 默认 GUI 使用 PySide6 和 pyqtgraph（`qt/`），旧界面使用 Python 自带的 Tkinter，由 `launcher.py` 选择。它们都不是识别包的依赖；导入 `hmm_gesture` 不加载 Qt、Tk、OpenZilo、Bleak 或训练平台。
 - `SignalFilter` / `FeatureExtractor` 只有一个实现，训练与推理共用。训练算法放在 Studio；原脚本保留兼容入口。
 - GUI 只在主线程操作 Tk。BLE 拥有独立线程与 asyncio loop，训练在单独工作线程执行，使用队列把状态交回 GUI。
 
@@ -27,7 +27,7 @@ legacy CLI ── ring_stream.py ── OpenZilo SDK
 
 Studio 的 `device.py` 把 BLE 连接与 IMU 就绪状态分开。只有收到新 IMU 批次才报告可采集；停报或 DEVICE_BUSY 保留 BLE，等待重试，实际断连才退避重连。数据间断会通知 GUI 取消未完成手势并重置分段。原 `ring_stream.py` 继续服务旧命令行，不改变其一次性采集语义。
 
-自动音频监听没有待处理通知时不占用 IMU；检测到保存通知或音频帧后，由同一业务消费者暂停 IMU、接收完整文件，再恢复探测。SDK 0.6.2 自带请求/写锁，Studio 不重复获取 SDK 写锁，只保留发送取消保护与传输观察。远程 FLASH 录音确认保存后下载；实时 LIVE_AND_FLASH 通过 PyAV 接收 PCM，完整 END 后才保存 WAV。下载文件先保存原始字节，再用有时限的 ffmpeg 转 WAV；解码失败不丢原数据。`plotting.py` 只在 Tk 主线程绘制有界滚动数据及识别片段框，录制预览复用训练的 `SignalFilter` 并保留浮点输出，不修改原始录制。`device_history.py` 以原子 JSON 写入本机用户配置目录，仅保存成功连接的最近 20 台设备，不依赖工作目录。Studio 新增的 SDK `pcm` extra 与签名校验依赖不进入独立推理包。详情见 [Studio 指南](../studio/README.md)。
+自动音频监听没有待处理通知时不占用 IMU；检测到保存通知或音频帧后，由同一业务消费者暂停 IMU、接收完整文件，再恢复探测。SDK 0.6.2 自带请求/写锁，Studio 不重复获取 SDK 写锁，只保留发送取消保护与传输观察。远程 FLASH 录音确认保存后下载；实时 LIVE_AND_FLASH 通过 PyAV 接收 PCM，完整 END 后才保存 WAV。下载文件先保存原始字节，再用有时限的 ffmpeg 转 WAV；解码失败不丢原数据。`plotting.py`（旧界面）和 `qt/charts.py`（新界面）只在界面主线程绘制有界滚动数据及识别片段框，录制预览复用训练的 `SignalFilter` 并保留浮点输出，不修改原始录制。`device_history.py` 以原子 JSON 写入本机用户配置目录，仅保存成功连接的最近 20 台设备，不依赖工作目录。Studio 新增的 SDK `pcm` extra 与签名校验依赖不进入独立推理包。详情见 [Studio 指南](../studio/README.md)。
 
 “校准与固件”使用同一 BLE worker：校准向导拥有独立 IMU 消费者，校准诊断通过单独事件展示物理单位，绝不送入原始整数模型流水线。OTA 独占连接，包括预期的重启/重连，等待在途电量查询结束并暂停周期查询，不被普通掉线重连逻辑干扰；任何 OTA 尝试后结束当前 Studio 会话，不自动重试。关键边界见 [Studio 设备工具契约](../studio/SPEC.md)。
 
@@ -50,7 +50,7 @@ uv build --all-packages --wheel                   # 两个独立 wheel -> dist/
 - `uv add 包名` 修改识别包依赖；`uv add --package hmm-gesture-studio 包名` 修改平台依赖。
 - 手动修改 `pyproject.toml` 后运行 `uv lock`；依赖升级使用 `uv lock --upgrade-package 包名`。依赖声明与锁文件需一并提交，再同步环境、运行测试。
 - 日常启动与 CI 使用 `--locked`，依赖声明过期时直接报错，不默默改变锁定版本；不要手工编辑 `uv.lock`。
-- Tkinter 属于 Python/系统环境，不是 uv 包依赖。选择带 Tk 的 Python 后即可运行 GUI；纯推理无需 Tk。
+- PySide6 和 pyqtgraph 是平台的 uv 依赖。Tkinter 属于 Python/系统环境，不是 uv 包依赖，仅旧界面需要；纯推理无需 Qt 或 Tk。
 
 ## 公开识别 API
 

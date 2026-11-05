@@ -16,7 +16,7 @@
 
 | 部分 | 位置 / Python 导入名 | 用途与依赖 |
 | --- | --- | --- |
-| 训练平台 `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | Tkinter 桌面 GUI，实时六轴曲线、手势录制/训练/导出/试识别、戒指录音接收与下载；依赖识别包和官方 OpenZilo SDK |
+| 训练平台 `hmm-gesture-studio` | `studio/` / `hmm_gesture_studio` | 桌面 GUI（默认 PySide6，可用 `--ui legacy` 启动旧的 Tkinter 界面），实时六轴曲线、手势录制/训练/导出/试识别、戒指录音接收与下载；依赖识别包和官方 OpenZilo SDK |
 | 识别包 `hmm-gesture` | `src/hmm_gesture/` / `hmm_gesture` | 加载导出的模型，整段分类或流式分段识别；只依赖 NumPy、SciPy、hmmlearn，**不依赖 GUI、BLE 或训练平台** |
 
 ```mermaid
@@ -33,7 +33,7 @@ flowchart LR
 
 ## 快速开始：训练平台
 
-需要 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Git，以及带 Tkinter 的 Python。`.python-version` 将开发环境固定在 **Python 3.12**，两个包仍支持 Python 3.10+。
+需要 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 Git。`.python-version` 将开发环境固定在 **Python 3.12**，两个包仍支持 Python 3.10+。
 
 ```bash
 git clone https://github.com/ziloai/OpenZilo-HMM.git
@@ -45,7 +45,7 @@ uv run --locked --all-packages hmm-gesture-studio
 
 两个包由同一个 uv 工作区管理，共用 `.venv/` 和纳入版本控制的 `uv.lock`。`--all-packages` 安装两个包，无需手动创建或激活虚拟环境；`--locked` 检查依赖声明与锁文件一致。依赖统一维护在 `pyproject.toml` 中，不再单独维护 requirements 文件。
 
-Tkinter 由 Python/操作系统提供，不是普通 Python 包依赖；Ubuntu/Debian 可安装 `python3-tk`，Homebrew Python 需匹配版本的 `python-tk`。必要时用 `uv sync --locked --all-packages --python /path/to/python3.12` 指定带 Tk 的解释器。需在有图形桌面的环境运行 GUI。
+默认的 PySide6 界面由 uv 安装；Linux 若提示缺少系统库，请执行 `sudo apt install libegl1 libgl1 libxkbcommon0 libdbus-1-3`。启动旧的 Tkinter 界面请用 `uv run --locked --all-packages hmm-gesture-studio --ui legacy`。只有旧界面需要 Tkinter，它由 Python/操作系统提供，不是普通 Python 包依赖；Ubuntu/Debian 可安装 `python3-tk`，Homebrew Python 需匹配版本的 `python-tk`。必要时用 `uv sync --locked --all-packages --python /path/to/python3.12` 指定带 Tk 的解释器。需在有图形桌面的环境运行 GUI。
 
 ### 在 GUI 中完成训练
 
