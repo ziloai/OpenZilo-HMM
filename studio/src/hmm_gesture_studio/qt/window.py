@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from . import theme
 from .controller import StudioController
 from .dialogs import QtDialogs
+from .i18n import bind_text, language_manager, resolve, tr
 from .motion import CrossFade
 from .pages.about import AboutPage
 from .pages.audio import AudioPage
@@ -23,6 +24,7 @@ from .pages.diagnostics import DiagnosticsPage
 from .pages.live import LivePage
 from .pages.tools import ToolsPage
 from .pages.train import TrainPage
+from .pages.settings import SettingsPage
 from .widgets import button, label, set_text, set_tone
 
 NAV = (("capture", "采集"), ("train", "训练"), ("live", "实时"), ("diagnostics", "诊断"),
@@ -66,11 +68,11 @@ class DeviceCard(QPushButton):
         self.dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
         metrics = QFontMetrics(self.name.font())
         set_text(self.name, metrics.elidedText(c.device_summary, Qt.TextElideMode.ElideMiddle, 150))
-        set_text(self.detail, c.battery_text if c.connected else "点击连接设备" if not c.connecting else "可点击取消")
+        set_text(self.detail, c.battery_text if c.connected else tr("点击连接设备") if not c.connecting else tr("可点击取消"))
         set_tone(self.detail, c.battery_tone if c.connected and c.battery_tone != "normal" else None)
 
 
-_LEVEL_LABELS = {"warning": "警告：", "error": "错误："}
+_LEVEL_LABELS = {"warning": tr("警告："), "error": tr("错误：")}
 _LEVEL_COLORS = {"warning": theme.WARNING, "error": theme.CRITICAL}
 _LOG_ROLE = Qt.ItemDataRole.UserRole
 
@@ -124,12 +126,22 @@ class LogList(QListWidget):
         font = self.font()
         font.setPixelSize(12)
         self.setFont(font)
+        language_manager.changed.connect(self.retranslate)
+
+    def retranslate(self):
+        for index in range(self.count()):
+            item = self.item(index)
+            when, level, text = item._source_entry
+            item.setData(_LOG_ROLE, (when, level, resolve(_LEVEL_LABELS.get(level, "")) + resolve(text)))
+        self.doItemsLayout()
+        self.viewport().update()
 
     def add_entry(self, when, level, text):
         bar = self.verticalScrollBar()
         following = bar.value() >= bar.maximum()
         item = QListWidgetItem()
-        shown = _LEVEL_LABELS.get(level, "") + text
+        shown = resolve(_LEVEL_LABELS.get(level, "")) + resolve(text)
+        item._source_entry = (when, level, text)
         item.setData(_LOG_ROLE, (when, level, shown))
         self.addItem(item)
         while self.count() > LOG_LINES:
@@ -164,7 +176,7 @@ class LogBar(QWidget):
         self.latest = label(role="caption")
         self.latest.setMinimumWidth(0)
         top.addWidget(self.latest, 1)
-        self.toggle = button("显示日志", self._toggle, kind="link")
+        self.toggle = button(tr("显示日志"), self._toggle, kind="link")
         top.addWidget(self.toggle)
         layout.addLayout(top)
         self.view = LogList()
@@ -176,18 +188,27 @@ class LogBar(QWidget):
         self._motion.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._motion.valueChanged.connect(lambda height: self.view.setFixedHeight(int(height)))
         self._motion.finished.connect(self._motion_finished)
+        self._latest_entry = None
+        language_manager.changed.connect(self._render_latest)
 
     def append(self, when, level, text):
         self.view.add_entry(when, level, text)
-        lines = text.splitlines()
-        first = f"{when}  {_LEVEL_LABELS.get(level, '')}{lines[0] if lines else ''}"
+        self._latest_entry = (when, level, text)
+        self._render_latest()
+
+    def _render_latest(self):
+        if self._latest_entry is None:
+            return
+        when, level, text = self._latest_entry
+        lines = resolve(text).splitlines()
+        first = f"{when}  {resolve(_LEVEL_LABELS.get(level, ''))}{lines[0] if lines else ''}"
         self.latest.setText(QFontMetrics(self.latest.font()).elidedText(
             first, Qt.TextElideMode.ElideRight, max(200, self.latest.width())))
         set_tone(self.latest, {"warning": "warning", "error": "critical"}.get(level))
 
     def _toggle(self):
         self._expanded = not self._expanded
-        self.toggle.setText("收起日志" if self._expanded else "显示日志")
+        set_text(self.toggle, tr("收起日志") if self._expanded else tr("显示日志"))
         self._motion.stop()
         self._motion.setStartValue(self.view.height() if self.view.isVisible() else 0)
         self._motion.setEndValue(LOG_HEIGHT if self._expanded else 0)
@@ -229,7 +250,7 @@ class MainWindow(QMainWindow):
         self._merge_title_bar = sys.platform == "darwin" if merge_title_bar is None else merge_title_bar
         self._safe_area_window = None
         # A merged title bar has nothing to label; the app name still identifies the window.
-        self.setWindowTitle("" if self._merge_title_bar else "OpenZilo 手势与录音工作室")
+        bind_text(self, "" if self._merge_title_bar else tr("OpenZilo 手势与录音工作室"), "setWindowTitle")
         if self._merge_title_bar:
             self.setWindowFlag(Qt.WindowType.ExpandedClientAreaHint)
             self.setWindowFlag(Qt.WindowType.NoTitleBarBackgroundHint)
@@ -266,7 +287,7 @@ class MainWindow(QMainWindow):
         self.pages = {}
         for name, page_class in (("capture", CapturePage), ("train", TrainPage), ("live", LivePage),
                                  ("diagnostics", DiagnosticsPage), ("audio", AudioPage), ("tools", ToolsPage),
-                                 ("device", DevicePage), ("about", AboutPage)):
+                                 ("device", DevicePage), ("about", AboutPage), ("settings", SettingsPage)):
             page = page_class(self.controller, self.navigate)
             self.pages[name] = page
             self.stack.addWidget(page)
@@ -277,6 +298,7 @@ class MainWindow(QMainWindow):
         c.closeFinished.connect(self._close_now)
         self.navigate("capture")
         self._render_sidebar()
+        language_manager.changed.connect(self._render_sidebar)
 
     def _build_sidebar(self):
         sidebar = QWidget()
@@ -303,13 +325,18 @@ class MainWindow(QMainWindow):
         self.nav_group.setExclusive(False)  # The device page has no nav row, so none may be checked.
         self.nav_buttons = {}
         for name, text in NAV:
-            item = button(text, lambda name=name: self.navigate(name), kind="nav")
+            item = button(tr(text), lambda name=name: self.navigate(name), kind="nav")
             item.setCheckable(True)
             self.nav_group.addButton(item)
             self.nav_buttons[name] = item
             layout.addWidget(item)
         layout.addStretch(1)
-        about = button("关于", lambda: self.navigate("about"), kind="nav")
+        settings = button(tr("设置"), lambda: self.navigate("settings"), kind="nav")
+        settings.setCheckable(True)
+        self.nav_group.addButton(settings)
+        self.nav_buttons["settings"] = settings
+        layout.addWidget(settings)
+        about = button(tr("关于"), lambda: self.navigate("about"), kind="nav")
         about.setCheckable(True)
         self.nav_group.addButton(about)
         self.nav_buttons["about"] = about

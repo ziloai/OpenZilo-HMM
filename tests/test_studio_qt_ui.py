@@ -36,6 +36,13 @@ CAPABILITIES = dict(recording_control=True, live_audio=True, audio_files=True, i
 ACTIVE = dict(state="active", message="IMU 正常上报", sample_rate_hz=25.0, accel_range_g=8, gyro_range_dps=2000)
 
 
+def setUpModule():
+    from hmm_gesture_studio.qt.i18n import language_manager
+    previous = language_manager.preference
+    language_manager.set_preference("zh", persist=False)
+    unittest.addModuleCleanup(language_manager.set_preference, previous, persist=False)
+
+
 class WindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -53,7 +60,7 @@ class WindowTests(unittest.TestCase):
                                   history=DeviceHistory(self.dir / "devices.json"),
                                   directory=self.dir / "data", audio_directory=self.dir / "audio")
         self.addCleanup(self.c.executor.shutdown, wait=False)
-        self.win = MainWindow(controller=self.c)
+        self.win = MainWindow(controller=self.c, merge_title_bar=False)
         self.win.resize(1280, 860)
         self.win.show()
         self.c.start()

@@ -15,6 +15,8 @@ from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
+from .i18n import tr
+
 API_URL = "https://api.github.com/repos/ziloai/OpenZilo-HMM/contributors?per_page=100"
 AVATAR_HOST = "avatars.githubusercontent.com"
 PROFILE_HOST = "github.com"
@@ -56,19 +58,19 @@ def parse_contributors(data) -> list[Contributor]:
 
 def failure_text(status, network_error=None):
     if status in (403, 429):
-        return "GitHub 请求次数已达上限，请稍后重试。"
+        return tr("GitHub 请求次数已达上限，请稍后重试。")
     if status == 404:
-        return "无法访问贡献者列表：GitHub 上找不到该仓库。"
+        return tr("无法访问贡献者列表：GitHub 上找不到该仓库。")
     if status:
-        return f"GitHub 返回错误（HTTP {status}），请稍后重试。"
-    return f"无法连接 GitHub，请检查网络后重试。{network_error or ''}".rstrip()
+        return tr("GitHub 返回错误（HTTP {status}），请稍后重试。", status=status)
+    return tr("无法连接 GitHub，请检查网络后重试。{error}", error=(network_error or "").rstrip())
 
 
 class ContributorFetcher(QObject):
     """Main-thread and asynchronous; a new fetch supersedes any earlier one."""
 
     loaded = Signal(list)
-    failed = Signal(str)
+    failed = Signal(object)
     avatarLoaded = Signal(str, QImage)
 
     def __init__(self, parent=None):
@@ -112,7 +114,7 @@ class ContributorFetcher(QObject):
         try:
             contributors = parse_contributors(reply.readAll().data())
         except ValueError:  # Includes JSON and Unicode decoding errors.
-            self.failed.emit("GitHub 返回的数据无法解析，请稍后重试。")
+            self.failed.emit(tr("GitHub 返回的数据无法解析，请稍后重试。"))
             return
         self.loaded.emit(contributors)
         for contributor in contributors:

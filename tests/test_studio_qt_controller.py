@@ -24,6 +24,13 @@ ACTIVE = dict(state="active", message="IMU 正常上报", sample_rate_hz=25.0, a
 ADDRESS = "AA:BB:CC:DD:EE:01"
 
 
+def setUpModule():
+    from hmm_gesture_studio.qt.i18n import language_manager
+    previous = language_manager.preference
+    language_manager.set_preference("zh", persist=False)
+    unittest.addModuleCleanup(language_manager.set_preference, previous, persist=False)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

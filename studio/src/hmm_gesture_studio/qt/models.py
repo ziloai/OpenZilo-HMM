@@ -10,6 +10,7 @@ import numpy as np
 
 from ..acceleration import acceleration_scale, acceleration_vector
 from ..plotting import MAX_REGIONS, RecognitionRegion, RollingIMUBuffer
+from .i18n import tr
 
 
 def seconds_axis(count, rate):
@@ -61,7 +62,7 @@ class LiveStreamModel:
                 or not 0 <= start_sample < end_sample <= self.next_sample):
             raise ValueError("recognition interval must be within the received stream")
         if end_sample > self.next_sample - len(self.buffer):
-            self._regions.append(RecognitionRegion(start_sample, end_sample, str(label)))
+            self._regions.append(RecognitionRegion(start_sample, end_sample, label if isinstance(label, str) else str(label)))
             self.revision += 1
 
     def clear(self):
@@ -105,7 +106,7 @@ class LiveStreamModel:
 class AccelerationModel:
     """Bounded magnitude history; stale values are cleared when the stream changes."""
 
-    IDLE_STATUS = "等待 IMU；量程未知"
+    IDLE_STATUS = tr("等待 IMU；量程未知")
 
     def __init__(self):
         self.buffer = RollingIMUBuffer()
@@ -129,12 +130,13 @@ class AccelerationModel:
                 self.buffer.set_sample_rate(rate)
                 self.clear()
             self.range_g = new_range
-            units = f"量程 ±{new_range:g} g" if new_range is not None else "量程未知，仅显示 raw"
-            self.status = f"IMU 正常上报；{rate:g} Hz；{units}；时间轴按采样率估算，非设备时间戳"
+            units = tr("量程 ±{range_g:g} g", range_g=new_range) if new_range is not None else tr("量程未知，仅显示 raw")
+            self.status = tr("IMU 正常上报；{rate:g} Hz；{units}；时间轴按采样率估算，非设备时间戳",
+                             rate=rate, units=units)
         else:
             self.range_g = None
             self.clear()
-            self.status = payload.get("message", "无新 IMU 数据；旧值已清除")
+            self.status = tr(payload.get("message", "无新 IMU 数据；旧值已清除"))
         self._active = active
         self.revision += 1
 
@@ -192,43 +194,47 @@ def analyze_recording(samples, pipeline, *, segmentation=None, training_region=N
     signal_filter, _ = make_pipeline(pipeline)
     filtered = signal_filter.apply(data)
     regions = ()
-    detail = "整段参与训练"
+    detail = tr("整段参与训练")
     if training_region is not None:
         start, end = training_region
-        regions = (RecognitionRegion(start, end, "手动训练窗口"),)
+        regions = (RecognitionRegion(start, end, tr("手动训练窗口")),)
         filtered[start:end] = signal_filter.apply(data[start:end])
-        detail = (f"手动训练窗口：样本 [{start}, {end})，"
-                  f"{start / pipeline.sample_rate_hz:.2f}–{end / pipeline.sample_rate_hz:.2f} 秒，{end - start} 帧")
+        detail = tr("手动训练窗口：样本 [{start}, {end})，{start_s:.2f}–{end_s:.2f} 秒，{frames} 帧",
+                    start=start, end=end, start_s=start / pipeline.sample_rate_hz,
+                    end_s=end / pipeline.sample_rate_hz, frames=end - start)
         if end - start < pipeline.min_samples:
-            detail += f"；无法训练：手动窗口过短，至少需要 {pipeline.min_samples} 帧"
+            detail = tr("{detail}；无法训练：手动窗口过短，至少需要 {min_samples} 帧",
+                        detail=detail, min_samples=pipeline.min_samples)
         else:
-            detail += "；只用框内训练，框外不参与"
-        detail += "；手动裁剪不改变实时触发条件"
+            detail = tr("{detail}；只用框内训练，框外不参与", detail=detail)
+        detail = tr("{detail}；手动裁剪不改变实时触发条件", detail=detail)
     elif segmentation is not None and segmentation.mode == "impulse":
         segments = MotionSegmenter(**asdict(segmentation)).feed_segments(data)
-        regions = tuple(RecognitionRegion(s.start_sample, s.end_sample, "训练窗口")
+        regions = tuple(RecognitionRegion(s.start_sample, s.end_sample, tr("训练窗口"))
                         for s in segments[:MAX_REGIONS])
         # Inside each box show the segment-local filtering the model actually sees.
         for segment in segments:
             filtered[segment.start_sample:segment.end_sample] = signal_filter.apply(segment.samples)
         if prepare_recording(data, segmentation) is not None:
-            detail = f"只用紫框内 {len(segments[0].samples)} 帧训练，框外等待不参与"
+            detail = tr("只用紫框内 {frames} 帧训练，框外等待不参与", frames=len(segments[0].samples))
         else:
-            detail = f"无法训练：需恰好一个完整冲击及前后文，当前 {len(segments)} 个完整窗口"
+            detail = tr("无法训练：需恰好一个完整冲击及前后文，当前 {count} 个完整窗口", count=len(segments))
         if len(segments) > MAX_REGIONS:
-            detail += f"（仅显示前 {MAX_REGIONS} 框）"
+            detail = tr("{detail}（仅显示前 {count} 框）", detail=detail, count=MAX_REGIONS)
     rate = pipeline.sample_rate_hz
     peak = impulse_peak(data)
     attenuation = ""
     if peak > 1000:
         ratio = float(np.linalg.norm(np.diff(filtered[:, :3], axis=0), axis=1).max()) / peak
-        attenuation = f"；相邻加速度变化峰值保留 {ratio:.0%}"
+        attenuation = tr("；相邻加速度变化峰值保留 {ratio:.0%}", ratio=ratio)
         if ratio < 0.3:
-            attenuation += "（短促动作可能被过度平滑）"
-    median = "关闭" if pipeline.median_kernel == 1 else pipeline.median_kernel
-    status = (f"{len(data)} 样本 / {len(data) / rate:.2f} 秒；{rate:g} Hz；中值 {median} → "
-              f"{pipeline.filter_order} 阶低通 {pipeline.cutoff_hz:g} Hz（当前训练参数，原始数据不变）"
-              f"{attenuation}；{detail}")
+            attenuation = tr("{attenuation}（短促动作可能被过度平滑）", attenuation=attenuation)
+    median = tr("关闭") if pipeline.median_kernel == 1 else pipeline.median_kernel
+    status = tr("{count} 样本 / {seconds:.2f} 秒；{rate:g} Hz；中值 {median} → "
+                "{order} 阶低通 {cutoff:g} Hz（当前训练参数，原始数据不变）{attenuation}；{detail}",
+                count=len(data), seconds=len(data) / rate, rate=rate, median=median,
+                order=pipeline.filter_order, cutoff=pipeline.cutoff_hz,
+                attenuation=attenuation, detail=detail)
     return RecordingView(data, filtered, regions, training_region, rate, pipeline.min_samples, status)
 
 

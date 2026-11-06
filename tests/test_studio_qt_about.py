@@ -41,6 +41,13 @@ def png_bytes(color="#ff0000", size=8):
     return bytes(buffer.data())
 
 
+def setUpModule():
+    from hmm_gesture_studio.qt.i18n import language_manager
+    previous = language_manager.preference
+    language_manager.set_preference("zh", persist=False)
+    unittest.addModuleCleanup(language_manager.set_preference, previous, persist=False)
+
+
 class ParseTests(unittest.TestCase):
     def test_keeps_people_in_order_and_skips_bots(self):
         bob = dict(ALICE, login="bob-2", html_url="https://github.com/bob-2")

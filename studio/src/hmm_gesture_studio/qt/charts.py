@@ -14,6 +14,7 @@ import pyqtgraph as pg
 
 from ..plotting import AXES, RecognitionRegion
 from . import theme
+from .i18n import language_manager, resolve, tr
 from .models import drag_to_region, recording_region_span
 from .widgets import label, set_text
 
@@ -66,6 +67,9 @@ class ChartPanel(QWidget):
         self._x = np.empty(0)
         self._y = np.empty((0, len(names)))
         self._region_items = []
+        self._text_sources = {}
+        self._axis_labels = {}
+        self._hover_x = None
         self.on_hover = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -116,6 +120,25 @@ class ChartPanel(QWidget):
         self.plot.addItem(self._empty, ignoreBounds=True)
         layout.addWidget(self.plot, 1)
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
+        language_manager.changed.connect(self._retranslate)
+
+    def set_axis_label(self, side, text):
+        """Keep the translation source: pyqtgraph stores only the rendered string."""
+        self._axis_labels[side] = text
+        self.plot.setLabel(side, resolve(text))
+
+    def _set_item_text(self, item, text):
+        self._text_sources[item] = text
+        item.setText(resolve(text))
+
+    def _retranslate(self):
+        # Update labels in place, never set_data/set_regions: ranges, pooled items,
+        # raw overlays and an in-progress selection must survive a language change.
+        for item, text in self._text_sources.items():
+            item.setText(resolve(text))
+        for side, text in self._axis_labels.items():
+            self.plot.setLabel(side, resolve(text))
+        self.show_hover(self._hover_x)
 
     def set_data(self, x, y, *, raw=None, x_range, y_limits=None, empty_text=""):
         self._x, self._y = x, y
@@ -129,7 +152,7 @@ class ChartPanel(QWidget):
         scale = np.concatenate((y.ravel(), raw.ravel())) if raw is not None else y.ravel()
         low, high = y_limits if y_limits is not None else _limits(scale)
         self.view_box.setRange(xRange=x_range, yRange=(low, high), padding=0, disableAutoRange=True)
-        self._empty.setText(empty_text if not len(x) else "")
+        self._set_item_text(self._empty, empty_text if not len(x) else "")
         self._empty.setPos((x_range[0] + x_range[1]) / 2, (low + high) / 2)
 
     def set_regions(self, spans):
@@ -163,7 +186,7 @@ class ChartPanel(QWidget):
             region.setRegion((start, stop))
             region.blockLineSignal = False
             caption.setColor(QColor(color))
-            caption.setText(text)
+            self._set_item_text(caption, text)
             caption.setPos(start, top)
             region.show()
             caption.show()
@@ -177,6 +200,7 @@ class ChartPanel(QWidget):
             self.show_hover(x)
 
     def show_hover(self, x):
+        self._hover_x = x
         if x is None or not len(self._x):
             self._crosshair.hide()
             for name, text in self._legend:
@@ -188,7 +212,7 @@ class ChartPanel(QWidget):
         self._crosshair.setPos(self._x[index])
         self._crosshair.show()
         for column, (name, text) in enumerate(self._legend):
-            set_text(text, f"{name} {self._format.format(self._y[index, column])}")
+            set_text(text, tr("{name} {value}", name=name, value=self._format.format(self._y[index, column])))
 
 
 def _link_hover(panels):
@@ -209,8 +233,10 @@ class LiveImuChart(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.ELEMENT_GAP)
-        self.accel = ChartPanel("加速度 · 原始 int16", AXES[:3], theme.AXIS_COLORS)
-        self.gyro = ChartPanel("陀螺仪 · 原始 int16", AXES[3:], theme.AXIS_COLORS)
+        self.accel = ChartPanel(tr("加速度 · 原始 int16"), AXES[:3], theme.AXIS_COLORS)
+        self.gyro = ChartPanel(tr("陀螺仪 · 原始 int16"), AXES[3:], theme.AXIS_COLORS)
+        for panel in (self.accel, self.gyro):
+            panel.set_axis_label("bottom", tr("相对最新样本时间（s，按采样率估算，非设备时间戳）"))
         layout.addWidget(self.accel, 1)
         layout.addWidget(self.gyro, 1)
         _link_hover((self.accel, self.gyro))
@@ -223,7 +249,7 @@ class LiveImuChart(QWidget):
         seconds = self.model.buffer.seconds
         for group, panel in enumerate((self.accel, self.gyro)):
             panel.set_data(x, data[:, group * 3:group * 3 + 3], x_range=(-seconds, 0.0),
-                           empty_text="等待 IMU 样本")
+                           empty_text=tr("等待 IMU 样本"))
             panel.set_regions([(start, stop, text, theme.REGION) for start, stop, text in spans])
 
 
@@ -234,7 +260,7 @@ class RecordingChart(QWidget):
         super().__init__()
         self._on_region = on_region
         self._view = None
-        self._empty_text = "暂无录制波形"
+        self._empty_text = tr("暂无录制波形")
         self._overlay = True
         self._selecting = False
         self._editable = False
@@ -244,8 +270,10 @@ class RecordingChart(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.ELEMENT_GAP)
-        self.accel = ChartPanel("加速度 · 滤波后", AXES[:3], theme.AXIS_COLORS, unit_format="{:.1f}")
-        self.gyro = ChartPanel("陀螺仪 · 滤波后", AXES[3:], theme.AXIS_COLORS, unit_format="{:.1f}")
+        self.accel = ChartPanel(tr("加速度 · 滤波后"), AXES[:3], theme.AXIS_COLORS, unit_format="{:.1f}")
+        self.gyro = ChartPanel(tr("陀螺仪 · 滤波后"), AXES[3:], theme.AXIS_COLORS, unit_format="{:.1f}")
+        for panel in (self.accel, self.gyro):
+            panel.set_axis_label("bottom", tr("录制时间（s，按采样率估算，非设备时间戳）"))
         layout.addWidget(self.accel, 1)
         layout.addWidget(self.gyro, 1)
         _link_hover((self.accel, self.gyro))
@@ -253,10 +281,10 @@ class RecordingChart(QWidget):
             panel.view_box.drag_handler = self._drag
         self._draw()
 
-    def set_view(self, view, empty_text="暂无录制波形"):
+    def set_view(self, view, empty_text=None):
         self.cancel_drag()  # A switch/reload must never finish an earlier recording's drag.
         self._view = view
-        self._empty_text = empty_text
+        self._empty_text = tr("暂无录制波形") if empty_text is None else empty_text
         self._draw()
 
     def set_overlay(self, enabled):
@@ -337,7 +365,7 @@ class RecordingChart(QWidget):
         if view is not None:
             regions = view.regions
             if self._drag_region is not None:
-                regions = (RecognitionRegion(*self._drag_region, "手动训练窗口（预览）"),)
+                regions = (RecognitionRegion(*self._drag_region, tr("手动训练窗口（预览）")),)
             for region in regions:
                 span = recording_region_span(region, view)
                 if span is None:
@@ -347,9 +375,9 @@ class RecordingChart(QWidget):
                          and frames < view.min_samples)
                 text = region.label
                 if self._drag_region is not None:
-                    text += f" · {frames} 帧"
+                    text = tr("{label} · {frames} 帧", label=text, frames=frames)
                 if short:
-                    text += f"（无法训练，至少 {view.min_samples} 帧）"
+                    text = tr("{label}（无法训练，至少 {min_samples} 帧）", label=text, min_samples=view.min_samples)
                 spans.append((*span, text, theme.CRITICAL if short else theme.REGION))
         for panel in (self.accel, self.gyro):
             panel.set_regions(spans)
@@ -359,7 +387,8 @@ class MagnitudeChart(ChartPanel):
     """One magnitude series with dashed, directly labelled reference bands."""
 
     def __init__(self, narrow, wide):
-        super().__init__("合加速度 |a|", ["|a|"], [theme.AXIS_COLORS[0]], unit_format="{:.4f}")
+        super().__init__(tr("合加速度 |a|"), ["|a|"], [theme.AXIS_COLORS[0]], unit_format="{:.4f}")
+        self.set_axis_label("bottom", tr("相对最新样本时间（s，按采样率估算，非设备时间戳）"))
         self._lines = []
         self._captions = []
         for band, color, text in ((narrow, theme.GOOD, "±3%"), (wide, theme.WARNING, "±10%")):
@@ -368,7 +397,8 @@ class MagnitudeChart(ChartPanel):
                 self.plot.addItem(line, ignoreBounds=True)
                 self._lines.append(line)
             # One label per band, on its upper line, so close bands do not collide.
-            caption = pg.TextItem(f"{text} · {band[0]:g}–{band[1]:g} g", color=color, anchor=(0, 1))
+            caption = pg.TextItem("", color=color, anchor=(0, 1))
+            self._set_item_text(caption, tr("{band} · {low:g}–{high:g} g", band=text, low=band[0], high=band[1]))
             caption.setFont(_caption_font())
             self.plot.addItem(caption, ignoreBounds=True)
             self._captions.append((caption, band[1]))
@@ -390,6 +420,7 @@ class DirectionDial(QWidget):
         self.axes = axis_x, axis_y
         self.direction = None
         self.setMinimumSize(170, 170)
+        language_manager.changed.connect(self.update)
 
     def set_direction(self, direction):
         if direction != self.direction:
@@ -404,8 +435,8 @@ class DirectionDial(QWidget):
         radius = min(width, height - 28) / 2 - 22
         cx, cy = width / 2, (height + 20) / 2
         painter.setPen(QColor(theme.INK))
-        title = f"{names[self.axes[0]]}{names[self.axes[1]]} 平面"
-        painter.drawText(QRectF(0, 0, width, 20), Qt.AlignmentFlag.AlignCenter, title)
+        title = tr("{axes} 平面", axes=names[self.axes[0]] + names[self.axes[1]])
+        painter.drawText(QRectF(0, 0, width, 20), Qt.AlignmentFlag.AlignCenter, resolve(title))
         painter.setPen(QPen(QColor(theme.HAIRLINE), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(QPointF(cx, cy), radius, radius)

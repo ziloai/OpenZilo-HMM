@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
 
 from .. import theme
 from ..charts import RecordingChart
+from ..i18n import resolve, tr
 from ..motion import PulseDot
 from ..widgets import (
     Card, Combo, DeviceNotice, Page, Switch, button, label, line_edit, row, set_field_text, set_kind, set_text, table,
@@ -19,15 +20,15 @@ class CapturePage(Page):
         c = controller
         self._shown = (None, False)
         top = self.add_section()
-        self.header(top, "采集手势", "每次录制一个完整动作，前后留少量静止。每次至少 12 个样本；拒识标定每类至少 3 次，建议 5–10 次以上。")
-        self.notice = DeviceNotice(self, "尚未连接戒指。")
+        self.header(top, tr("采集手势"), tr("每次录制一个完整动作，前后留少量静止。每次至少 12 个样本；拒识标定每类至少 3 次，建议 5–10 次以上。"))
+        self.notice = DeviceNotice(self, tr("尚未连接戒指。"))
         top.add(self.notice)
 
-        self.name = line_edit(on_edit=c.set_name, width=220, placeholder="手势名称，如 响指")
-        self.record = button("开始一次录制", c.toggle_record, kind="primary")
-        self.undo = button("撤销最近一次", c.undo)
-        self.save = button("保存 / 追加", c.save_takes)
-        self.discard = button("清空未保存录制", c.discard_takes)
+        self.name = line_edit(on_edit=c.set_name, width=220, placeholder=tr("手势名称，如 响指"))
+        self.record = button(tr("开始一次录制"), c.toggle_record, kind="primary")
+        self.undo = button(tr("撤销最近一次"), c.undo)
+        self.save = button(tr("保存 / 追加"), c.save_takes)
+        self.discard = button(tr("清空未保存录制"), c.discard_takes)
         top.add(row(self.name, self.record, self.undo, self.save, self.discard))
         self.pulse = PulseDot()
         self.pulse.hide()
@@ -41,10 +42,10 @@ class CapturePage(Page):
         self.choice = Combo()
         self.choice.setMinimumWidth(180)
         self.choice.activated.connect(c.set_preview_index)
-        self.overlay = Switch("叠加原始波形（虚线）")
+        self.overlay = Switch(tr("叠加原始波形（虚线）"))
         self.overlay.setChecked(True)
-        self.selecting = Switch("手动框选")
-        self.reset_crop = button("恢复自动裁剪", self._restore_automatic)
+        self.selecting = Switch(tr("手动框选"))
+        self.reset_crop = button(tr("恢复自动裁剪"), self._restore_automatic)
         top.add(self.title)
         top.add(row(self.choice, self.overlay, self.selecting, self.reset_crop))
         self.chart = RecordingChart(c.set_preview_training_region)
@@ -56,25 +57,25 @@ class CapturePage(Page):
         self.selecting.toggled.connect(lambda _on: self._sync_selection())
 
         more = self.add_section()
-        more.add(label("数据集", "section"))
+        more.add(label(tr("数据集"), "section"))
         card = Card()
         more.add(card)
-        self.directory = label(tone="muted", selectable=True)
-        self.choose_dir = button("选择数据目录", c.choose_directory)
+        self.directory = label(tone="muted", selectable=True, wrap=True)
+        self.choose_dir = button(tr("选择数据目录"), c.choose_directory)
         card.add(row(self.directory, self.choose_dir))
-        self.table = table(("名称", "重复数", "采样率 Hz", "各次样本数"), multi=True)
+        self.table = table((tr("名称"), tr("重复数"), tr("采样率 Hz"), tr("各次样本数")), multi=True)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(1, 80)
         self.table.setColumnWidth(2, 100)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         card.add(self.table)
-        self.refresh = button("刷新", c.refresh)
-        self.import_json = button("导入 JSON", c.import_json)
-        self.import_csv = button("导入 CSV（多选）", c.import_csv)
-        self.delete = button("删除选中手势", c.delete_datasets, kind="danger")
+        self.refresh = button(tr("刷新"), c.refresh)
+        self.import_json = button(tr("导入 JSON"), c.import_json)
+        self.import_csv = button(tr("导入 CSV（多选）"), c.import_csv)
+        self.delete = button(tr("删除选中手势"), c.delete_datasets, kind="danger")
         card.add(row(self.refresh, self.import_json, self.import_csv, self.delete))
-        card.add(label("CSV：无表头，六列逗号分隔；每文件一次重复。训练使用列表中全部有效 JSON。", "caption", wrap=True))
+        card.add(label(tr("CSV：无表头，六列逗号分隔；每文件一次重复。训练使用列表中全部有效 JSON。"), "caption", wrap=True))
         self.finish()
 
         c.datasetsChanged.connect(self._rebuild_table)
@@ -95,7 +96,7 @@ class CapturePage(Page):
             return
         self._shown = shown
         if recording:
-            self.chart.set_view(None, "正在录制，停止后显示波形")
+            self.chart.set_view(None, tr("正在录制，停止后显示波形"))
         else:
             self.chart.set_view(c.preview_view)
 
@@ -114,13 +115,22 @@ class CapturePage(Page):
         c = self.controller
         self.choice.blockSignals(True)
         self.choice.clear()
-        self.choice.addItems(c.preview_choices)
+        self.choice.addItems([resolve(text) for text in c.preview_choices])
         self.choice.setCurrentIndex(c.preview_index)
         self.choice.blockSignals(False)
         self._sync_chart()
         self._sync_selection()
         if self.isVisible():
             self.render_state()
+
+    def retranslate(self):
+        # Translate item captions in place; do not emit a new preview selection.
+        self.choice.blockSignals(True)
+        try:
+            for index, text in enumerate(self.controller.preview_choices):
+                self.choice.setItemText(index, resolve(text))
+        finally:
+            self.choice.blockSignals(False)
 
     def _rebuild_table(self):
         c = self.controller
@@ -147,7 +157,7 @@ class CapturePage(Page):
         set_field_text(self.name, c.name)
         self.name.setEnabled(c.name_editable)
         recording = c.take is not None
-        set_text(self.record, "停止并保留本次" if recording else "开始一次录制")
+        set_text(self.record, tr("停止并保留本次") if recording else tr("开始一次录制"))
         set_kind(self.record, "record" if recording else "primary")
         self.record.setEnabled(c.can_record)
         self.undo.setEnabled(c.can_undo)
@@ -163,6 +173,6 @@ class CapturePage(Page):
         self.choice.setEnabled(bool(c.preview_choices) and not recording)
         self._sync_chart()
         self._sync_selection()
-        set_text(self.title, "录制中" if recording else f"录制波形 · {c.preview_title}")
-        set_text(self.caption, "" if recording else
-                 f"{c.preview_message}。在任一图内水平拖动框选，再次拖动替换，Esc 取消；原始数据不变。")
+        set_text(self.title, tr("录制中") if recording else tr("录制波形 · {title}", title=c.preview_title))
+        set_text(self.caption, "" if recording else tr(
+            "{message}。在任一图内水平拖动框选，再次拖动替换，Esc 取消；原始数据不变。", message=c.preview_message))

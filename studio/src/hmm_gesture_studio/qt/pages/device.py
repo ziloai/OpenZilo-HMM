@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QHeaderView, QTableWidgetItem
 
 from ...plotting import AXES
+from ..i18n import resolve, tr
 from ..motion import Busy
 from ..widgets import Card, Page, StatTile, button, field, label, line_edit, row, set_field_text, set_text, set_tone, table
 
@@ -15,40 +16,40 @@ class DevicePage(Page):
         super().__init__(controller, navigate)
         c = controller
         top = self.add_section()
-        self.header(top, "设备", "IMU 无需切换模式；连接后按设备能力开放功能。macOS 地址通常是 UUID。")
+        self.header(top, tr("设备"), tr("IMU 无需切换模式；连接后按设备能力开放功能。macOS 地址通常是 UUID。"))
         self.status = label(wrap=True, selectable=True)
         top.add(self.status)
         self.battery = label(role="strong")
         top.add(self.battery)
-        self.address = line_edit(on_edit=c.set_address, placeholder="设备地址")
+        self.address = line_edit(on_edit=c.set_address, placeholder=tr("设备地址"))
         self.address.setMinimumWidth(320)
-        self.connect_button = button("连接", c.connect_device, kind="primary")
-        self.disconnect_button = button("断开 / 取消连接", c.disconnect_device)
-        self.connecting = Busy("正在连接…")
+        self.connect_button = button(tr("连接"), c.connect_device, kind="primary")
+        self.disconnect_button = button(tr("断开 / 取消连接"), c.disconnect_device)
+        self.connecting = Busy(tr("正在连接…"))
         top.add(row(self.address, self.connect_button, self.disconnect_button, self.connecting))
 
         more = self.add_section()
-        more.add(label("可用设备", "section"))
+        more.add(label(tr("可用设备"), "section"))
         devices = Card()
         more.add(devices)
-        self.scan = button("扫描", c.scan)
-        self.clear_history = button("清空设备历史", c.clear_device_history)
-        self.scanning = Busy("正在扫描附近的戒指，最长约 8 秒…")
+        self.scan = button(tr("扫描"), c.scan)
+        self.clear_history = button(tr("清空设备历史"), c.clear_device_history)
+        self.scanning = Busy(tr("正在扫描附近的戒指，最长约 8 秒…"))
         devices.add(row(self.scan, self.clear_history, self.scanning))
-        devices.add(label("历史设备可直接连接，无需重新扫描；最多保留最近 20 台。", "caption", wrap=True))
-        self.table = table(("名称", "地址", "来源", "RSSI"), height=190)
+        devices.add(label(tr("历史设备可直接连接，无需重新扫描；最多保留最近 20 台。"), "caption", wrap=True))
+        self.table = table((tr("名称"), tr("地址"), tr("来源"), "RSSI"), height=190)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(0, 220)
         self.table.setColumnWidth(2, 70)
         self.table.itemSelectionChanged.connect(self._selected)
         devices.add(self.table)
 
-        imu = Card("IMU 上报")
+        imu = Card(tr("IMU 上报"))
         more.add(imu)
         self.stream = label(wrap=True)
         imu.add(self.stream)
         self.tiles = [StatTile(name) for name in AXES]
-        self.count = StatTile("样本数", "0")
+        self.count = StatTile(tr("样本数"), "0")
         grid = QGridLayout()
         grid.setHorizontalSpacing(36)
         grid.setVerticalSpacing(12)
@@ -59,9 +60,9 @@ class DevicePage(Page):
         imu.add(grid)
         self.raw_note = label(role="caption")
         imu.add(self.raw_note)
-        self.retry = button("重试 IMU 上报", c.retry_imu)
+        self.retry = button(tr("重试 IMU 上报"), c.retry_imu)
         imu.add(row(self.retry))
-        capabilities = Card("设备能力")
+        capabilities = Card(tr("设备能力"))
         more.add(capabilities)
         self.capabilities = label(wrap=True)
         capabilities.add(self.capabilities)
@@ -75,14 +76,26 @@ class DevicePage(Page):
         self.table.setRowCount(len(c.device_entries))
         for index, entry in enumerate(c.device_entries):
             rssi = "—" if entry["rssi"] is None else str(entry["rssi"])
-            for column, value in enumerate((entry["name"], entry["address"], entry["source"], rssi)):
-                item = QTableWidgetItem(value)
+            for column, value in enumerate((entry["name"], entry["address"], tr(entry["source"]), rssi)):
+                item = QTableWidgetItem(resolve(value))
                 item.setData(Qt.ItemDataRole.UserRole, entry["address"])
                 self.table.setItem(index, column, item)
             if entry["address"].casefold() == c.address.strip().casefold():
                 self.table.selectRow(index)
         self.table.blockSignals(False)
         set_field_text(self.address, c.address)
+
+    def retranslate(self):
+        # Device names and addresses are data; only deferred controller text resolves.
+        self.table.blockSignals(True)
+        try:
+            for index, entry in enumerate(self.controller.device_entries):
+                for column, key in ((0, "name"), (2, "source")):
+                    item = self.table.item(index, column)
+                    if item is not None:
+                        item.setText(resolve(tr(entry[key]) if key == "source" else entry[key]))
+        finally:
+            self.table.blockSignals(False)
 
     def _selected(self):
         selected = self.table.selectedItems()
@@ -99,7 +112,7 @@ class DevicePage(Page):
         self.connect_button.setEnabled(c.can_connect)
         self.disconnect_button.setEnabled(c.can_disconnect)
         self.scan.setEnabled(c.can_scan)
-        set_text(self.scan, "扫描中…" if c.scanning else "扫描")
+        set_text(self.scan, tr("扫描中…") if c.scanning else tr("扫描"))
         self.scanning.set_busy(c.scanning)
         self.connecting.set_busy(c.connecting)
         self.table.setEnabled(c.can_connect)
