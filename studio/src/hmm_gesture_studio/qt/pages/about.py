@@ -10,11 +10,12 @@ from PySide6.QtWidgets import QGridLayout, QPushButton, QVBoxLayout, QWidget
 
 from .. import theme
 from ..contributors import ContributorFetcher
+from ..i18n import tr
 from ..motion import Busy
 from ..widgets import Card, Page, StatTile, button, label, row, set_text, set_tone
 
-REPOSITORIES = (("OpenZilo-HMM", "手势识别与训练平台", "https://github.com/ziloai/OpenZilo-HMM"),
-                ("OpenZilo", "戒指 SDK", "https://github.com/ziloai/OpenZilo"))
+REPOSITORIES = (("OpenZilo-HMM", tr("手势识别与训练平台"), "https://github.com/ziloai/OpenZilo-HMM"),
+                ("OpenZilo", tr("戒指 SDK"), "https://github.com/ziloai/OpenZilo"))
 _TILE_WIDTH = _TILE_HEIGHT = theme.CONTRIBUTOR_TILE
 _AVATAR_SIZE = 64
 
@@ -24,7 +25,7 @@ def package_version(name):
     try:
         return metadata.version(name)
     except metadata.PackageNotFoundError:
-        return "未知"
+        return tr("未知")
 
 
 class Avatar(QWidget):
@@ -140,13 +141,13 @@ class AboutPage(Page):
         self._requested = False
         self.fetcher = ContributorFetcher(self)
         top = self.add_section()
-        self.header(top, "关于", "OpenZilo 手势与录音工作室")
-        self.app_version = StatTile("应用版本", package_version("hmm-gesture-studio"))
+        self.header(top, tr("关于"), tr("OpenZilo 手势与录音工作室"))
+        self.app_version = StatTile(tr("应用版本"), package_version("hmm-gesture-studio"))
         self.sdk_version = StatTile("OpenZilo SDK", package_version("OpenZilo"))
         top.add(row(self.app_version, self.sdk_version, spacing=64))
 
         more = self.add_section()
-        more.add(label("GitHub 仓库", "section"))
+        more.add(label(tr("GitHub 仓库"), "section"))
         repositories = Card()
         more.add(repositories)
         self.repository_links = []
@@ -158,11 +159,11 @@ class AboutPage(Page):
             repositories.add(line)
 
         people = self.add_section()
-        self.refresh = button("刷新", self.load)
-        people.add(row(label("贡献者", "section"), self.refresh))
+        self.refresh = button(tr("刷新"), self.load)
+        people.add(row(label(tr("贡献者"), "section"), self.refresh))
         card = Card()
         people.add(card)
-        self.loading = Busy("正在从 GitHub 获取…")
+        self.loading = Busy(tr("正在从 GitHub 获取…"))
         card.add(self.loading)
         self.message = label(tone="muted", wrap=True)
         self.message.hide()
@@ -199,7 +200,7 @@ class AboutPage(Page):
         self._finish_loading()
         self.grid.set_tiles([ContributorTile(c, self.controller.open_url) for c in contributors])
         if not contributors:
-            self._show_message("暂无贡献者信息。", "muted")
+            self._show_message(tr("暂无贡献者信息。"), "muted")
 
     def _failed(self, text):
         # Keep anything shown earlier: stale names beat an empty card.

@@ -13,17 +13,19 @@ def main() -> None:
         raise SystemExit("无法初始化桌面显示：请在有图形桌面的环境运行。")
     from PySide6.QtWidgets import QApplication, QMessageBox
 
+    from .i18n import language_manager, resolve, tr
     from .theme import apply_theme
     from .window import MainWindow
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("OpenZilo Studio")
+    language_manager.initialize()
     apply_theme(app)
     try:
         window = MainWindow()
         window.show()
         window.controller.start()
     except Exception as exc:
-        QMessageBox.critical(None, "启动失败", str(exc))
-        raise SystemExit(f"桌面平台启动失败：{exc}") from exc
+        QMessageBox.critical(None, resolve(tr("启动失败")), str(exc))
+        raise SystemExit(tr("桌面平台启动失败：{error}", error=str(exc))) from exc
     raise SystemExit(app.exec())

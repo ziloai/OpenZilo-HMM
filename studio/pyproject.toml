@@ -28,3 +28,6 @@ hmm-gesture = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+hmm_gesture_studio = ["qt/locales/*.json"]

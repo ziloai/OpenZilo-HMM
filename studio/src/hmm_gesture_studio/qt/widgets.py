@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
+from .i18n import bind_text, language_manager, tr
 
 
 def _repolish(widget):
@@ -19,7 +20,8 @@ def _repolish(widget):
 
 
 def label(text="", role=None, *, tone=None, wrap=False, selectable=False):
-    item = QLabel(text)
+    item = QLabel()
+    bind_text(item, text)
     if role:
         item.setProperty("role", role)
     if tone:
@@ -37,7 +39,8 @@ def set_tone(item, tone):
 
 
 def button(text, on_click=None, *, kind=None):
-    item = QPushButton(text)
+    item = QPushButton()
+    bind_text(item, text)
     item.setCursor(Qt.CursorShape.PointingHandCursor)
     if kind:
         item.setProperty("kind", kind)
@@ -54,8 +57,7 @@ def set_kind(item, kind):
 
 def set_text(item, text):
     """Avoid relayout when a periodically re-rendered value has not changed."""
-    if item.text() != text:
-        item.setText(text)
+    bind_text(item, text)
 
 
 def row(*items, spacing=theme.ELEMENT_GAP, stretch=True):
@@ -87,7 +89,7 @@ def field(caption, content):
 
 def line_edit(text="", *, on_edit=None, width=None, placeholder=""):
     item = QLineEdit(text)
-    item.setPlaceholderText(placeholder)
+    bind_text(item, placeholder, "setPlaceholderText")
     if width:
         item.setFixedWidth(width)
     if on_edit is not None:
@@ -129,7 +131,8 @@ class Switch(QWidget):
     def __init__(self, text=""):
         super().__init__()
         self._checked = False
-        self._text = text
+        self._text = ""
+        bind_text(self, text)
         self._position = 0.0
         self._slide = QVariantAnimation(self)
         self._slide.setDuration(theme.MOTION_FAST)
@@ -138,6 +141,12 @@ class Switch(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def setText(self, text):
+        self._text = text
+        self.setAccessibleName(text)
+        self.updateGeometry()
+        self.update()
 
     def text(self):
         return self._text
@@ -246,18 +255,18 @@ class StatTile(QWidget):
 
 class ReadOnlyText(QPlainTextEdit):
     def __init__(self, text="", *, height=120):
-        super().__init__(text)
+        super().__init__()
+        bind_text(self, text, "setPlainText")
         self.setReadOnly(True)
         self.setFixedHeight(height)
 
     def set_value(self, text):
-        if self.toPlainText() != text:
-            self.setPlainText(text)
+        bind_text(self, text, "setPlainText")
 
 
 def table(columns, *, multi=False, height=220):
     item = QTableWidget(0, len(columns))
-    item.setHorizontalHeaderLabels(columns)
+    bind_text(item, columns, "setHorizontalHeaderLabels")
     item.verticalHeader().hide()
     item.verticalHeader().setDefaultSectionSize(38)
     item.setShowGrid(False)
@@ -320,6 +329,7 @@ class Page(QScrollArea):
         self._sections.setSpacing(0)
         controller.stateChanged.connect(self._render_if_visible)
         controller.tick.connect(self._tick_if_visible)
+        language_manager.changed.connect(self._language_changed)
 
     def add_section(self):
         # Only the first section needs top space; later ones follow the previous bottom.
@@ -347,6 +357,13 @@ class Page(QScrollArea):
         super().showEvent(event)
         self.render_state()
 
+    def _language_changed(self):
+        self.retranslate()
+        self.render_state()
+
+    def retranslate(self):
+        """Refresh non-bound presentation without changing controller state."""
+
     def render_state(self):
         """Apply controller state to widgets."""
 
@@ -364,7 +381,7 @@ class DeviceNotice(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addWidget(label(text, tone="muted"))
-        layout.addWidget(button("前往连接 ›", lambda: page.navigate("device"), kind="link"))
+        layout.addWidget(button(tr("前往连接 ›"), lambda: page.navigate("device"), kind="link"))
         layout.addStretch(1)
 
     def render_state(self):

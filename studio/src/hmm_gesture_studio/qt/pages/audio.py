@@ -5,13 +5,15 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QHeaderView, QTableWidgetItem
 
+from ..i18n import resolve, tr
 from ..motion import Busy
 from ..widgets import (
     Card, Combo, DeviceNotice, Page, Switch, button, field, label, line_edit, row, set_field_text, set_text, table,
 )
 
-_LABELS = (("channels", "声道（1 / 2）"), ("bitrate", "码率（bits/s）"), ("gain_left_q8", "左增益 Q8"),
-           ("gain_right_q8", "右增益 Q8"), ("duration_s", "最长（秒）"))
+_LABELS = (("channels", tr("声道（1 / 2）")), ("bitrate", tr("码率（bits/s）")),
+           ("gain_left_q8", tr("左增益 Q8")), ("gain_right_q8", tr("右增益 Q8")),
+           ("duration_s", tr("最长（秒）")))
 _WORKING_STATES = {"starting", "listing", "downloading", "receiving", "saving", "stopping"}
 
 
@@ -20,18 +22,18 @@ class AudioPage(Page):
         super().__init__(controller, navigate)
         c, t = controller, controller.tools
         top = self.add_section()
-        self.header(top, "戒指录音", "四种音频操作不能并行；录音和传输期间 IMU 持续上报，不会中断。")
-        self.notice = DeviceNotice(self, "尚未连接戒指。")
+        self.header(top, tr("戒指录音"), tr("四种音频操作不能并行；录音和传输期间 IMU 持续上报，不会中断。"))
+        self.notice = DeviceNotice(self, tr("尚未连接戒指。"))
         top.add(self.notice)
         self.state = label(wrap=True)
         self.audio_busy = Busy()
         top.add(row(self.audio_busy, self.state))
-        self.directory = label(tone="muted", selectable=True)
-        self.choose_dir = button("选择录音目录", c.choose_audio_directory)
-        self.open_dir = button("打开录音目录", lambda: c.open_path(c.audio_directory))
+        self.directory = label(tone="muted", selectable=True, wrap=True)
+        self.choose_dir = button(tr("选择录音目录"), c.choose_audio_directory)
+        self.open_dir = button(tr("打开录音目录"), lambda: c.open_path(c.audio_directory))
         top.add(row(self.directory, self.choose_dir, self.open_dir))
 
-        form = Card("远程录音 / 实时 PCM")
+        form = Card(tr("远程录音 / 实时 PCM"))
         top.add(form)
         grid = QGridLayout()
         grid.setHorizontalSpacing(20)
@@ -41,44 +43,45 @@ class AudioPage(Page):
             self.inputs[key] = entry
             grid.addLayout(field(caption, entry), 0, column)
         form.add(grid)
-        self.read = button("读取设置 / 状态", t.read_config)
-        self.record = button("开始远程录音", t.start_recording, kind="primary")
-        self.finish_button = button("停止并保存", t.finish_recording)
-        self.live = button("实时 PCM 接收并保存", lambda: t.start_recording(live=True))
+        self.read = button(tr("读取设置 / 状态"), t.read_config)
+        self.record = button(tr("开始远程录音"), t.start_recording, kind="primary")
+        self.finish_button = button(tr("停止并保存"), t.finish_recording)
+        self.live = button(tr("实时 PCM 接收并保存"), lambda: t.start_recording(live=True))
         form.add(row(self.read, self.record, self.finish_button, self.live))
-        self.playback = Switch("边接收边播放（仅实时 PCM）")
+        self.playback = Switch(tr("边接收边播放（仅实时 PCM）"))
         self.playback.toggled.connect(t.set_playback)
-        form.add(row(self.playback, label("开始前打开；建议使用耳机，避免啸叫。", "caption")))
+        form.add(row(self.playback, label(tr("开始前打开；建议使用耳机，避免啸叫。"), "caption")))
         self.recording_text = label(tone="muted", wrap=True)
         form.add(self.recording_text)
-        form.add(label("远程保存到戒指后下载；实时接收同时保留设备副本，完整 END 后生成 WAV。"
-                       "播放失败只在日志提示，接收与保存继续。最长时间以 0.02 秒递增；增益 256 = 1 倍。", "caption", wrap=True))
+        form.add(label(tr("远程保存到戒指后下载；实时接收同时保留设备副本，完整 END 后生成 WAV。"
+                          "播放失败只在日志提示，接收与保存继续。最长时间以 0.02 秒递增；增益 256 = 1 倍。"), "caption", wrap=True))
 
         more = self.add_section()
-        more.add(label("接收与下载", "section"))
-        notify = Card("保存通知监听")
+        more.add(label(tr("接收与下载"), "section"))
+        notify = Card(tr("保存通知监听"))
         more.add(notify)
-        notify.add(label("戒指录音保存后，按通知索引自动下载。监听和传输都不中断 IMU。"
-                         "保留原始音频并解码 WAV；若漏收或中断，可查询历史录音重新下载。", "caption", wrap=True))
-        self.start = button("开启保存通知监听", c.start_audio)
-        self.stop = button("停止接收 / 下载", c.stop_audio)
+        notify.add(label(tr("戒指录音保存后，按通知索引自动下载。监听和传输都不中断 IMU。"
+                            "保留原始音频并解码 WAV；若漏收或中断，可查询历史录音重新下载。"), "caption", wrap=True))
+        self.start = button(tr("开启保存通知监听"), c.start_audio)
+        self.stop = button(tr("停止接收 / 下载"), c.stop_audio)
         notify.add(row(self.start, self.stop))
-        history = Card("戒指历史录音")
+        history = Card(tr("戒指历史录音"))
         more.add(history)
-        self.list = button("查询戒指历史录音", c.list_audio)
+        self.list = button(tr("查询戒指历史录音"), c.list_audio)
         self.remote = Combo()
         self.remote.setMinimumWidth(220)
-        self.remote.currentTextChanged.connect(c.set_remote_audio_selected)
-        self.download = button("下载选中录音", c.download_audio)
+        self.remote.currentIndexChanged.connect(
+            lambda _index: c.set_remote_audio_selected(self.remote.currentData() or ""))
+        self.download = button(tr("下载选中录音"), c.download_audio)
         history.add(row(self.list, self.remote, self.download))
-        files = Card("本次会话保存的文件")
+        files = Card(tr("本次会话保存的文件"))
         more.add(files)
-        self.table = table(("文件", "音频时长", "大小"), height=180)
+        self.table = table((tr("文件"), tr("音频时长"), tr("大小")), height=180)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(1, 100)
         self.table.itemSelectionChanged.connect(self.render_state)
         files.add(self.table)
-        self.open_file = button("打开选中文件", self._open_selected)
+        self.open_file = button(tr("打开选中文件"), self._open_selected)
         files.add(row(self.open_file))
         self.finish()
         c.audioFieldsChanged.connect(self._fields_replaced)
@@ -93,8 +96,9 @@ class AudioPage(Page):
         c = self.controller
         self.remote.blockSignals(True)
         self.remote.clear()
-        self.remote.addItems(list(c.remote_audio_files))
-        self.remote.setCurrentText(c.remote_audio_selected)
+        for key, text in c.remote_audio_choices:
+            self.remote.addItem(resolve(text), key)
+        self.remote.setCurrentIndex(self.remote.findData(c.remote_audio_selected))
         self.remote.blockSignals(False)
 
     def _files_changed(self):
@@ -102,9 +106,26 @@ class AudioPage(Page):
         self.table.setRowCount(len(rows))
         for index, entry in enumerate(rows):
             for column, key in enumerate(("name", "duration", "size")):
-                item = QTableWidgetItem(entry[key])
+                item = QTableWidgetItem(resolve(entry[key]))
                 item.setData(Qt.ItemDataRole.UserRole, index)
                 self.table.setItem(index, column, item)
+
+    def retranslate(self):
+        # Display captions are independent from the stable download-selection keys.
+        self.remote.blockSignals(True)
+        try:
+            for key, text in self.controller.remote_audio_choices:
+                index = self.remote.findData(key)
+                if index >= 0:
+                    self.remote.setItemText(index, resolve(text))
+        finally:
+            self.remote.blockSignals(False)
+        # Update existing cells: rebuilding would discard the selected file.
+        for index, entry in enumerate(self.controller.audio_rows):
+            for column, key in enumerate(("name", "duration", "size")):
+                item = self.table.item(index, column)
+                if item is not None:
+                    item.setText(resolve(entry[key]))
 
     def _open_selected(self):
         selected = self.table.selectedIndexes()
