@@ -11,9 +11,10 @@ def main() -> None:
             and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")):
         # Qt would abort the process with a much less helpful message.
         raise SystemExit("无法初始化桌面显示：请在有图形桌面的环境运行。")
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication
 
-    from .i18n import language_manager, resolve, tr
+    from .dialogs import QtDialogs
+    from .i18n import language_manager, tr
     from .theme import apply_theme
     from .window import MainWindow
 
@@ -26,6 +27,6 @@ def main() -> None:
         window.show()
         window.controller.start()
     except Exception as exc:
-        QMessageBox.critical(None, resolve(tr("启动失败")), str(exc))
+        QtDialogs().error(tr("启动失败"), str(exc))
         raise SystemExit(tr("桌面平台启动失败：{error}", error=str(exc))) from exc
     raise SystemExit(app.exec())

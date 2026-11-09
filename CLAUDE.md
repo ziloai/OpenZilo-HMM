@@ -24,7 +24,7 @@ uv run --locked --all-packages python -m unittest discover -s tests -v
 - `models.py`：图表数据与录制分析，不依赖 Qt 控件。
 - `pages/*`：每个页面在 `render_state()` 里从控制器读状态。启用/禁用规则写在控制器的属性上，不写在页面里。
 - `theme.py`：所有颜色和 QSS，其他文件不写颜色值。`widgets.py`、`charts.py`：可复用控件和图表。
-- 对话框经 `dialogs` 注入。模态框会运行嵌套事件循环，**确认之后必须重新检查状态**，再操作文件或硬件。
+- 对话框经 `dialogs` 注入。模态框会运行嵌套事件循环，**确认之后必须重新检查状态**，再操作文件或硬件。确认和错误提示用 `dialogs.py` 的 `StudioDialog`（不用 `QMessageBox`），危险操作默认落在取消上；文件选择保持系统原生。
 - `PySide6-Essentials` 约束为 `<6.12`：6.12 在 Python 3.10 上退出时崩溃（`free(): invalid size`）。放宽前要在 3.10 上验证退出码。
 
 ### 联网
@@ -85,7 +85,7 @@ uv run --locked --all-packages python -m unittest discover -s tests -v
 
 **动效：** 克制且有意义，时长取 `theme.MOTION`（220ms）和 `theme.MOTION_FAST`（150ms），工具在 `qt/motion.py`。
 
-- 现有动效：切页渐变、侧边栏高亮滑动、开关滑动、日志展开、进度条平滑、识别结果淡入、录制脉冲点。
+- 现有动效：切页渐变、侧边栏高亮滑动、开关滑动、日志展开、进度条平滑、识别结果淡入、录制脉冲点、弹窗淡入。
 - 耗时操作（扫描、连接、训练、验签、音频传输）必须显示 `Busy` 加载标识和说明文字，不能让用户以为点了没反应。结束状态要来自 worker 的明确事件，不能靠猜。
 - 循环动画只在控件可见时运行。不要对含图表的页面用 `QGraphicsOpacityEffect`，切页渐变用快照叠加实现。
 - 动效不能改变状态生效的时机：页面和控制器状态立即切换，动画只是表现。

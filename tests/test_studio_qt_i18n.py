@@ -213,18 +213,18 @@ class WindowLanguageTests(unittest.TestCase):
         self.assertEqual(self.dialogs.error.call_count, 2)
         self.assertIn("firmware", i18n.resolve(self.dialogs.error.call_args.args[1]).lower())
 
-    def test_native_confirmation_uses_selected_language(self):
-        from PySide6.QtWidgets import QMessageBox
-        from hmm_gesture_studio.qt.dialogs import QtDialogs
+    def test_confirmation_uses_selected_language(self):
+        from PySide6.QtWidgets import QDialog
+        from hmm_gesture_studio.qt.dialogs import QtDialogs, StudioDialog
         self.choose("en")
         def inspect(box):
-            # macOS intentionally ignores QMessageBox window titles.
-            self.assertEqual(box.text(), "Cannot open: /数据")
-            self.assertEqual(box.informativeText(), "Continue")
-            self.assertEqual(box.button(QMessageBox.StandardButton.No).text(), "Cancel")
-            self.assertIs(box.defaultButton(), box.button(QMessageBox.StandardButton.No))
-            return QMessageBox.StandardButton.No
-        with patch.object(QMessageBox, "exec", inspect):
+            self.assertEqual(box.windowTitle(), "Cannot open: /数据")
+            self.assertEqual(box.title_label.text(), "Cannot open: /数据")
+            self.assertEqual(box.body.toPlainText(), "Continue")
+            self.assertEqual(box.cancel_button.text(), "Cancel")
+            self.assertIs(box.default_button, box.cancel_button)
+            return QDialog.DialogCode.Rejected
+        with patch.object(StudioDialog, "exec", inspect):
             self.assertFalse(QtDialogs(self.window).ask(i18n.tr("无法打开：{path}", path="/数据"),
                                                         i18n.tr("继续"), danger=True))
 

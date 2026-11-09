@@ -21,6 +21,8 @@ GOOD = "#248a3d"
 WARNING = LAUNCH_ORANGE
 CRITICAL = "#d70015"
 REGION = "#8944ab"
+SCRIM = INK  # Dims the window behind a dialog, at SCRIM_OPACITY.
+SCRIM_OPACITY = 0.28
 
 FONT_FAMILIES = ("SF Pro Text", "PingFang SC", "Inter", "Helvetica Neue", "Segoe UI",
                  "Microsoft YaHei UI", "Noto Sans CJK SC", "Arial")
@@ -32,6 +34,8 @@ CARD_PADDING = 28
 ELEMENT_GAP = 12
 CHART_HEIGHT = 500
 CAPTURE_CHART_HEIGHT = 420  # Both panels fit above the fold at the default window size.
+DIALOG_WIDTH = 440
+DIALOG_BODY_MAX_HEIGHT = 320  # Longer messages scroll inside the dialog.
 CONTRIBUTOR_TILE = 112  # QSS sizes beat setFixedSize, so this is set in the stylesheet.
 MOTION_FAST = 150  # ms: toggles and small state changes.
 MOTION = 220  # ms: navigation and panels.
@@ -122,8 +126,25 @@ QScrollBar::handle:horizontal {{ background: {HAIRLINE}; border-radius: 3px; min
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
   background: transparent; border: none; width: 0; height: 0; }}
 QToolTip {{ background: {GALLERY_WHITE}; color: {INK}; border: 1px solid {HAIRLINE}; padding: 4px; }}
-QMessageBox {{ background: {GALLERY_WHITE}; }}
+
+QDialog#studioDialog {{ background: transparent; }}
+QFrame#dialogCard {{ background: {GALLERY_WHITE}; border: 1px solid {CONTROL_GRAY}; border-radius: 28px; }}
+QLabel#dialogBadge {{ background: {CRITICAL}; color: {GALLERY_WHITE}; font-size: 14px; font-weight: 600;
+  border-radius: 11px; min-width: 22px; max-width: 22px; min-height: 22px; max-height: 22px; }}
+QTextEdit#dialogBody {{ background: transparent; color: {INK}; border: none;
+  selection-background-color: {PRICING_BLUE}; selection-color: {GALLERY_WHITE}; }}
+QDialog#studioDialog QPushButton {{ min-width: 48px; }}
+QDialog#studioDialog QPushButton:focus {{ border-color: {PRICING_BLUE}; }}
+
 QFileDialog {{ background: {GALLERY_WHITE}; }}
+QFileDialog QTreeView#treeView, QFileDialog QListView#listView, QFileDialog QListView#sidebar {{
+  background: {GALLERY_WHITE}; color: {INK}; border: 1px solid {CONTROL_GRAY}; border-radius: 10px; outline: none;
+  selection-background-color: {CONTROL_GRAY}; selection-color: {INK}; }}
+QFileDialog QListView#sidebar {{ background: {STUDIO_MIST}; }}
+QFileDialog QToolButton {{ background: transparent; border: none; border-radius: 15px;
+  min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px; }}
+QFileDialog QToolButton:hover, QFileDialog QToolButton:checked {{ background: {STUDIO_MIST}; }}
+QFileDialog QToolButton:disabled {{ background: transparent; }}
 """
 
 
