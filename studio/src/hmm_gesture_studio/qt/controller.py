@@ -76,7 +76,7 @@ class StudioController(QObject):
     tick = Signal()
     closeFinished = Signal()
 
-    def __init__(self, dialogs, *, worker=None, history=None, directory=None, audio_directory=None):
+    def __init__(self, dialogs, *, worker=None, history=None, directory=None, audio_directory=None, plugin_root=None):
         super().__init__()
         self.dialogs = dialogs
         self.events = queue.Queue()
@@ -92,7 +92,6 @@ class StudioController(QObject):
         self.directory = Path(directory) if directory is not None else Path.cwd() / "gestures"
         self.audio_directory = Path(audio_directory) if audio_directory is not None else Path.cwd() / "audio"
         self.tools = ToolsController(self)
-        self.plugins = PluginsController(self)
         self.stream = LiveStreamModel()
         self.acceleration = AccelerationModel()
         self.params = dict(PARAM_DEFAULTS)
@@ -164,6 +163,10 @@ class StudioController(QObject):
         self._timer = None
         self._close_future = None
         self._close_deadline = 0.0
+        # Read metadata only after controller state exists; never import plugins here.
+        if plugin_root is None and history is not None:
+            plugin_root = Path(history.path).parent / "plugins" if hasattr(history, "path") else None
+        self.plugins = PluginsController(self, root=plugin_root)
 
     # ---------------------------------------------------------------- lifecycle
     def start(self):
@@ -181,6 +184,7 @@ class StudioController(QObject):
         self._timer.setInterval(50)
         self._timer.timeout.connect(self.poll)
         self._timer.start()
+        self.plugins.start()
         for hint in _STARTUP_HINTS:
             self.log(hint)
         self.notify()
@@ -191,6 +195,8 @@ class StudioController(QObject):
     def poll(self):
         if self.closing:
             return
+        self.drain_events()  # Apply disconnect/model/maintenance gates before dispatch.
+        self.plugins.poll()
         self.drain_events()
         if self._tick_dirty:
             self._tick_dirty = False
@@ -258,7 +264,12 @@ class StudioController(QObject):
 
     @property
     def can_toggle_live(self):
-        return not self.closing and not self.tools.busy and not self.training and self._imu_ready
+        return not self.closing and not self.tools.busy and not self.training and self._recognition_ready
+
+    @property
+    def _recognition_ready(self):
+        # Audio has its own consumer; capture restrictions are intentionally stricter.
+        return self.connected and self.imu_active and self.tools.supports("imu") and self.take is None
 
     @property
     def can_retry_imu(self):
@@ -567,6 +578,7 @@ class StudioController(QObject):
         if self.pending and not self.same_rate(self.pending_rate, self.actual_rate):
             self.error(tr("未保存录制与当前设备采样率不一致，请先保存或撤销。"))
             return
+        self.plugins.disarm()
         self.take_rate = self.actual_rate
         self.take = []
         self.notify()
@@ -868,6 +880,7 @@ class StudioController(QObject):
     def set_bundle(self, bundle, origin, summary):
         self.stop_live()
         self.bundle = bundle
+        self.plugins.set_model(bundle)
         self.origin = origin
         self.stale = False
         mode = tr("短促动作") if bundle.segmentation.mode == "impulse" else tr("连续动作")
@@ -900,6 +913,7 @@ class StudioController(QObject):
 
     # -------------------------------------------------------- live recognition
     def stop_live(self):
+        self.plugins.disarm()
         self.live = False
         if self.recognizer is not None:
             self.recognizer.reset()
@@ -919,8 +933,8 @@ class StudioController(QObject):
         try:
             if self.training or self.bundle is None or self.stale:
                 raise ValueError(tr("请先训练有效模型或加载模型包。"))
-            if self.tools.busy or not self._imu_ready:
-                raise ValueError(tr("请先连接设备并等待 IMU 恢复上报；录音期间不能试识别。"))
+            if self.tools.busy or not self._recognition_ready:
+                raise ValueError(tr("请先连接设备并等待 IMU 恢复上报；维护或手势采集期间不能试识别。"))
             if not self.same_rate(self.actual_rate, self.bundle.pipeline.sample_rate_hz):
                 raise ValueError(tr("采样率不匹配：设备 {device:g} Hz，模型 {model:g} Hz。",
                                     device=self.actual_rate, model=self.bundle.pipeline.sample_rate_hz))
@@ -960,6 +974,7 @@ class StudioController(QObject):
                       tr("相对置信度 {confidence:.3f}（非概率）", confidence=prediction.confidence))
         self.prediction = (prediction.name, tr("{assessment}；分数 {score:.3f}", assessment=assessment, score=prediction.score))
         self.prediction_serial += 1
+        self.plugins.prediction(prediction)
         self.result_text = tr("{name}；{assessment}", name=prediction.name, assessment=self.prediction[1])
         self.log(self.result_text)
         if prediction.start_sample is not None and prediction.end_sample is not None:
@@ -985,6 +1000,7 @@ class StudioController(QObject):
             else:
                 message = tr("{message}；{rate:g} Hz", message=message, rate=rate)
         else:
+            self.plugins.disarm()
             self.actual_rate = None
             self.cancel_take()
             if self.connected and self.live:
@@ -1000,7 +1016,7 @@ class StudioController(QObject):
         self.imu_active = active
         self.acceleration.set_stream_state(payload)
         self.stream_text = message
-        if active and self.live and self.recognizer is None and self.audio_state in {"idle", "listening"}:
+        if active and self.live and self.recognizer is None and self._recognition_ready:
             self._sync_live()
         self.notify()
 
@@ -1172,7 +1188,6 @@ class StudioController(QObject):
         if not self.tools.available("audio"):
             self.error(tr("请连接支持录音的戒指，停止手势录制、音频和工具后再查询。"))
             return
-        self.stop_live()
         self.set_audio_state({"state": "listing", "message": tr("正在查询历史录音…")})
         if not self.request(self.worker.list_audio):
             self.set_audio_state({"state": "idle", "message": tr("查询请求失败")})
@@ -1191,7 +1206,6 @@ class StudioController(QObject):
         if not self.tools.available("audio") or selected not in self.remote_audio_files:
             self.error(tr("请先查询并选择历史录音，停止当前手势录制/音频接收后再下载。"))
             return
-        self.stop_live()
         self.set_audio_state({"state": "downloading", "message": tr("正在准备下载…")})
         if not self.request(lambda: self.worker.download_audio(self.remote_audio_files[selected], self.audio_directory)):
             self.set_audio_state({"state": "idle", "message": tr("下载请求失败")})
@@ -1199,7 +1213,8 @@ class StudioController(QObject):
     def set_audio_state(self, payload):
         self.audio_state = payload["state"]
         self.audio_text = tr(payload.get("message", self.audio_state))
-        if self.audio_state in {"idle", "listening"} and self.imu_active and self.live and self.recognizer is None:
+        self.plugins.audio_state_changed(self.audio_state)
+        if self._recognition_ready and self.live and self.recognizer is None:
             self._sync_live()
         self.notify()
 
@@ -1222,6 +1237,14 @@ class StudioController(QObject):
 
     # ------------------------------------------------------------------- events
     def handle(self, event, payload):
+        if event == "plugin":
+            self.plugins.handle(payload)
+            return
+        if event == "plugin_job":
+            self.plugins.handle_job(payload)
+            return
+        if event == "tool_state" and payload.get("state") != "idle":
+            self.plugins.disarm()
         if self.tools.handle(event, payload):
             return
         if event == "samples":
@@ -1285,6 +1308,7 @@ class StudioController(QObject):
             self.log(tr("戒指中有 {count} 个录音文件；不会自动删除设备文件。", count=len(payload)))
             self.notify()
         elif event == "audio_saved":
+            self.plugins.audio_saved(payload)
             path = Path(payload["path"])
             duration = payload.get("duration_s")
             self.audio_rows.append(dict(path=path, name=path.name,
@@ -1362,6 +1386,7 @@ class StudioController(QObject):
         self.scanning = False
         self.cancel_take()
         self.stop_live()
+        self.plugins.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.set_battery_status()
         self.status = tr("正在关闭设备，最多等待 8 秒…")

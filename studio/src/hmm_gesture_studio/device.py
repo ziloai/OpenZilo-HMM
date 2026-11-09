@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import threading
 from weakref import WeakSet
+from uuid import uuid4
 
 import openzilo as sdk
 
@@ -29,6 +30,20 @@ BATTERY_TIMEOUT = 2.0
 class _RecordingRequest:
     options: dict
     playback: bool = False
+    owner: str | None = None
+    session_id: str = field(default_factory=lambda: str(uuid4()))
+
+
+class _RecordingMetadata(dict):
+    """Save-local provenance, never inferred from a pending/last recording.
+
+    Keep the metadata mapping and _save call compatible with ordinary downloads;
+    host ownership is not device metadata and is not persisted as such.
+    """
+
+    def __init__(self, metadata, request):
+        super().__init__(metadata)
+        self.request = request
 
 
 class _StudioClient(sdk.OpenZiloClient):
@@ -299,8 +314,10 @@ class RingWorker:
     def read_recording_config(self):
         self._control(self._accept_audio, "config", None, None)
 
-    def start_remote_recording(self, options, directory, *, live=False, playback=False):
-        request = _RecordingRequest(dict(options), playback=bool(live and playback))
+    def start_remote_recording(self, options, directory, *, live=False, playback=False,
+                               owner=None, session_id=None):
+        request = _RecordingRequest(dict(options), playback=bool(live and playback),
+                                    owner=owner, session_id=session_id or str(uuid4()))
         self._control(self._accept_audio, "live" if live else "record", request, directory)
 
     def finish_remote_recording(self):
@@ -743,6 +760,13 @@ class RingWorker:
             result = await task
         if result.get("warning"):
             self._emit("warning", result["warning"])
+        if isinstance(metadata, _RecordingMetadata):
+            # Copy only remote results; historical/auto downloads retain their
+            # original result identity and never inherit recording ownership.
+            result = dict(result, owner=metadata.request.owner,
+                          session_id=metadata.request.session_id)
+            if "session_id" in metadata:
+                result["device_session_id"] = metadata["session_id"]
         self._emit("audio_saved", result)
         if cancelled:
             raise asyncio.CancelledError()
@@ -780,7 +804,7 @@ class RingWorker:
                             ring, index.options, live=kind == "live", stop=self._recording_stop,
                             emit=self._emit, playback=index.playback,
                             save=lambda data, file_index, metadata: self._save(
-                                data, file_index, directory, metadata,
+                                data, file_index, directory, _RecordingMetadata(metadata, index),
                             ),
                         )
                     finally:

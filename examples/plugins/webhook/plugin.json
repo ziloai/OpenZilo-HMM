@@ -1,0 +1,26 @@
+{
+  "id": "example.webhook",
+  "name": "HTTPS Webhook 示例",
+  "version": "1.0.0",
+  "author": "OpenZilo 示例",
+  "description": "向明确确认的 HTTPS 站点发送动作参数中的 JSON；不上传音频，不重试，不跟随重定向。",
+  "api_version": 1,
+  "entry": "main.py",
+  "platforms": ["darwin", "win32", "linux"],
+  "requirements": [],
+  "settings": [
+    {"key": "url", "title": "HTTPS 目标地址", "kind": "text", "default": "", "required": true, "help": "请确认目标域名、站点运营方、隐私政策和接收用途；只发送给你信任的站点。不要把 token 放入地址；不接受用户信息或 fragment。", "group": "目标"},
+    {"key": "confirmed_target", "title": "已确认目标站点及发送用途", "kind": "switch", "default": false, "help": "修改地址后请重新确认。允许向该站点发送绑定/手动参数中的 payload；不代表允许上传录音。", "group": "目标"},
+    {"key": "token", "title": "Bearer token（可选）", "kind": "secret", "default": "", "help": "仅放入 Authorization 请求头；不写入日志。系统凭据库不可用时仅保留会话。", "group": "认证"},
+    {"key": "timeout_seconds", "title": "HTTP 超时（秒）", "kind": "number", "default": 5, "minimum": 1, "maximum": 15, "help": "网络操作超时；宿主动作另有 30 秒上限。超时不重试，接收端可能已执行。", "group": "网络"}
+  ],
+  "actions": [
+    {"key": "post", "title": "发送 JSON", "timeout": 30, "parameters": [
+      {"key": "payload", "title": "JSON 请求体", "kind": "text", "default": "{\"message\":\"gesture detected\"}", "required": true, "help": "必须是 JSON 对象，编码后不超过 64 KiB；原样作为请求体，不做模板替换，不自动附带手势、路径或音频。请勿写入密钥。"}
+    ]}
+  ],
+  "permissions": [
+    {"key": "network", "title": "联网发送参数", "detail": "向用户确认的 HTTPS 站点发送 JSON 和可选 Bearer token。目标站点可保存收到的数据；本示例不跟随重定向，不使用环境代理，不读取响应体。", "sensitive": true}
+  ],
+  "events": []
+}

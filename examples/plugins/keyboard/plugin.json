@@ -1,0 +1,26 @@
+{
+  "id": "example.keyboard",
+  "name": "键盘快捷键示例",
+  "version": "1.0.0",
+  "author": "OpenZilo 示例",
+  "description": "向当前前台应用发送快捷键或经允许的文本；请先在空白文档中测试。",
+  "api_version": 1,
+  "entry": "main.py",
+  "platforms": ["darwin", "win32"],
+  "requirements": ["pynput==1.8.1"],
+  "settings": [
+    {"key": "allow_text", "title": "允许输入文本", "kind": "switch", "default": false, "help": "默认关闭。文本会发送至当前焦点，不应包含密码。macOS 需授权辅助功能。", "group": "安全"}
+  ],
+  "actions": [
+    {"key": "hotkey", "title": "发送快捷键", "timeout": 10, "parameters": [
+      {"key": "keys", "title": "组合键", "kind": "text", "default": "primary+c", "required": true, "help": "用 + 分隔，如 primary+shift+s；primary 在 macOS 为 Command，在 Windows 为 Ctrl。支持 ctrl、alt、shift、cmd、enter、tab、space、esc、backspace、delete、方向键、F1–F12 或单个英文字母/数字。"}
+    ]},
+    {"key": "type_text", "title": "输入文本", "timeout": 10, "parameters": [
+      {"key": "text", "title": "文本", "kind": "text", "default": "Hello", "required": true, "help": "最多 1000 字符；需先打开插件设置中的允许输入文本。"}
+    ]}
+  ],
+  "permissions": [
+    {"key": "keyboard", "title": "模拟键盘输入", "detail": "影响当前焦点应用，可触发危险操作。macOS 需辅助功能权限；Linux 不支持。权限声明不是安全隔离。", "sensitive": true}
+  ],
+  "events": []
+}

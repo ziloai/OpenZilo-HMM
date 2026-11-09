@@ -1,0 +1,27 @@
+{
+  "id": "example.recorder",
+  "name": "本地录音分析示例",
+  "version": "1.0.0",
+  "author": "OpenZilo 示例",
+  "description": "通过宿主开始/停止录音，完整保存后在本地提取 WAV 元数据及 SHA-256，写入 JSON；不转写、不上传、不收费。",
+  "api_version": 1,
+  "entry": "main.py",
+  "platforms": ["darwin", "win32", "linux"],
+  "requirements": [],
+  "settings": [
+    {"key": "analyze_completed", "title": "生成本地分析结果", "kind": "switch", "default": true, "help": "处理宿主授权的 recording.completed：默认自身，也支持选择所有新录音或手动选择已有 WAV。订阅需启用且不回放；完整 raw 未解码时跳过。", "group": "本地处理"}
+  ],
+  "actions": [
+    {"key": "start", "title": "开始录音", "timeout": 30, "parameters": [
+      {"key": "max_seconds", "title": "最长录音时长（秒）", "kind": "number", "default": 60, "minimum": 1, "maximum": 60, "help": "本示例接受 1–60 的整数秒，符合硬件 0.02 秒步长。动作返回 starting 和会话标识，不代表录音已完成。"},
+      {"key": "live", "title": "实时预览", "kind": "switch", "default": false, "help": "由宿主管理实时消费链路，不建立额外设备连接。"}
+    ]},
+    {"key": "stop", "title": "请求停止本插件录音", "timeout": 30, "parameters": []},
+    {"key": "status", "title": "查询宿主录音状态", "timeout": 10, "parameters": []}
+  ],
+  "permissions": [
+    {"key": "recording.control", "title": "控制设备录音", "detail": "通过宿主 RPC 申请录音，不绕过设备、OTA、诊断互斥；录音可能包含敏感声音。停止不等于完整保存。", "sensitive": true},
+    {"key": "recording.completed", "title": "读取已授权的已保存录音", "detail": "默认仅订阅自身新完成的录音；也处理经宿主授权的所有新录音或手动选择的已有 WAV。读取 WAV 并在插件数据目录保存元数据和哈希，不上传或转写；完整 raw 未解码时跳过。订阅需单独启用。", "sensitive": true}
+  ],
+  "events": ["recording.completed"]
+}

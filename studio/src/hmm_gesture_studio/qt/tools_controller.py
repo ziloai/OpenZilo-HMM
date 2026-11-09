@@ -105,37 +105,80 @@ class ToolsController:
     def read_config(self):
         if self._require("read"):
             app = self.app
-            app.stop_live()
             app.set_audio_state({"state": "listing", "message": tr("正在读取录音设置 / 状态…")})
             if not app.request(app.worker.read_recording_config):
                 app.set_audio_state({"state": "idle", "message": tr("读取设置请求失败")})
 
-    def start_recording(self, *, live=False):
-        if not self._require("live_audio" if live else "record"):
-            return
+    def start_recording(self, *, live=False, owner=None, session_id=None, max_seconds=None) -> bool:
+        """Submit audio without resetting live inference; SDK failures never open dialogs."""
+        action = "live_audio" if live else "record"
+        if owner is not None:
+            if not self.available(action):
+                raise ValueError(tr("请连接支持此功能的设备，并先停止手势录制、音频或其他工具。"))
+        elif not self._require(action):
+            return False
         try:
-            options = recording_options(self.fields)
+            if type(live) is not bool:
+                raise ValueError("live must be a boolean")
+            if owner is not None and (not isinstance(owner, str) or not owner.strip()
+                                      or not isinstance(session_id, str) or not session_id.strip()):
+                raise ValueError("Recording owner and session_id must be nonempty strings")
+            fields = dict(self.fields)
+            if max_seconds is not None:
+                fields["duration_s"] = max_seconds
+            options = recording_options(fields)
         except (ValueError, KeyError) as exc:
+            if owner is not None:
+                raise ValueError(str(exc)) from exc
             self.app.error(str(exc))
-            return
+            return False
         app = self.app
-        app.stop_live()
         self.remote_session = True
         app.set_audio_state({"state": "starting", "message": tr("正在启动实时接收…") if live else tr("正在启动远程录音…")})
-        playback = bool(live and self.playback)
-        if not app.request(lambda: app.worker.start_remote_recording(
-                options, app.audio_directory, live=live, playback=playback)):
+        kwargs = dict(live=live, playback=bool(live and self.playback))
+        if owner is not None:
+            kwargs.update(owner=owner, session_id=session_id)
+
+        def submit():
+            app.worker.start_remote_recording(options, app.audio_directory, **kwargs)
+
+        try:
+            if owner is not None:
+                submit()  # app.request reports errors with a modal dialog; RPC must not.
+                accepted = True
+            else:
+                accepted = app.request(submit)
+        except Exception:
             self.remote_session = False
             app.set_audio_state({"state": "idle", "message": tr("启动录音失败")})
+            raise
+        if not accepted:
+            self.remote_session = False
+            app.set_audio_state({"state": "idle", "message": tr("启动录音失败")})
+        return accepted
 
-    def finish_recording(self):
-        if not self._require("finish"):
-            return
+    def finish_recording(self, *, owner=None) -> bool:
+        # Session ownership is checked by PluginsController, not by this UI helper.
+        if owner is not None:
+            if not self.available("finish"):
+                raise ValueError(tr("请连接支持此功能的设备，并先停止手势录制、音频或其他工具。"))
+        elif not self._require("finish"):
+            return False
         app = self.app
         previous = app.audio_state
         app.set_audio_state({"state": "stopping", "message": tr("正在停止并等待完整音频保存…")})
-        if not app.request(app.worker.finish_remote_recording):
+        try:
+            if owner is not None:
+                app.worker.finish_remote_recording()
+                accepted = True
+            else:
+                accepted = app.request(app.worker.finish_remote_recording)
+        except Exception:
             app.set_audio_state({"state": previous, "message": tr("停止请求失败，可重试")})
+            raise
+        if not accepted:
+            app.set_audio_state({"state": previous, "message": tr("停止请求失败，可重试")})
+        return accepted
 
     def _start_tool(self, action, state, operation):
         if not self._require(action):

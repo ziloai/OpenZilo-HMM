@@ -1,0 +1,24 @@
+{
+  "id": "example.media",
+  "name": "媒体按键示例",
+  "version": "1.0.0",
+  "author": "OpenZilo 示例",
+  "description": "使用系统媒体键控制播放和音量，实际效果由前台应用及系统决定。",
+  "api_version": 1,
+  "entry": "main.py",
+  "platforms": ["darwin", "win32"],
+  "requirements": ["pynput==1.8.1"],
+  "settings": [
+    {"key": "repeat_interval", "title": "连续按键间隔（秒）", "kind": "number", "default": 0.15, "minimum": 0.05, "maximum": 1, "help": "只用于同一次动作内的重复按键，不会自动重试失败动作。", "group": "发送"}
+  ],
+  "actions": [
+    {"key": "send", "title": "发送媒体键", "timeout": 10, "parameters": [
+      {"key": "key", "title": "媒体键", "kind": "choice", "default": "play_pause", "options": [["play_pause", "播放 / 暂停"], ["next", "下一首"], ["previous", "上一首"], ["volume_up", "增大音量"], ["volume_down", "减小音量"], ["mute", "静音切换"]], "required": true},
+      {"key": "repeat", "title": "次数", "kind": "number", "default": 1, "minimum": 1, "maximum": 5, "help": "整数。播放/暂停和静音是切换操作，重复两次可能恢复原状态。"}
+    ]}
+  ],
+  "permissions": [
+    {"key": "keyboard", "title": "模拟媒体键", "detail": "可改变系统音量和媒体播放状态。macOS 需辅助功能权限；Linux 不支持。", "sensitive": true}
+  ],
+  "events": []
+}
