@@ -98,7 +98,9 @@ class WindowLanguageTests(unittest.TestCase):
         self.worker, self.dialogs = Mock(), Mock()
         self.controller = StudioController(self.dialogs, worker=self.worker,
                                            history=DeviceHistory(directory / "devices.json"),
-                                           directory=directory / "data", audio_directory=directory / "audio")
+                                           directory=directory / "data", audio_directory=directory / "audio",
+                                           plugin_root=directory / "plugins")
+        self.addCleanup(self.controller.plugins.close)
         self.addCleanup(self.controller.executor.shutdown, wait=False)
         self.window = MainWindow(controller=self.controller, merge_title_bar=False)
         self.window.resize(1100, 720)
@@ -125,12 +127,21 @@ class WindowLanguageTests(unittest.TestCase):
         combo.setCurrentIndex(combo.findData(preference))
         self.pump()
 
-    def test_settings_shows_only_headings_and_language_selector(self):
+    def test_settings_language_and_storage_controls_retranslate(self):
         from PySide6.QtWidgets import QLabel
         page = self.window.pages["settings"]
-        for language, headings in (("zh", ["设置", "语言"]), ("en", ["Settings", "Language"])):
+        self.window.navigate("settings")
+        for language, headings, cache_text, data_text in (
+                ("zh", ["设置", "语言", "缓存与插件数据"], "清理缓存", "清除插件数据"),
+                ("en", ["Settings", "Language", "Cache and plugin data"], "Clear cache", "Clear plugin data")):
             self.choose(language)
-            self.assertEqual([label.text() for label in page.findChildren(QLabel)], headings)
+            labels = [label.text() for label in page.findChildren(QLabel)]
+            for heading in headings:
+                self.assertIn(heading, labels)
+            self.assertEqual(page.clear_cache.text(), cache_text)
+            self.assertEqual(page.clear_plugin_data.text(), data_text)
+            self.assertFalse(page.clear_cache.isEnabled())
+            self.assertFalse(page.clear_plugin_data.isEnabled())
             self.assertEqual(page.language.count(), 3)
             self.assertEqual(page.language.accessibleName(), i18n.resolve(i18n.tr("界面语言")))
 

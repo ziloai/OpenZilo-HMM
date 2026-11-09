@@ -316,6 +316,10 @@ class PluginsPage(Page):
         gestures.add(label(tr("一个手势可以触发多个动作。绑定按模型内容指纹保存；其他模型的绑定保留，但不会由当前模型触发。"), tone="muted", wrap=True))
         self.model_fingerprint = _path_field()
         gestures.add(field(tr("当前模型指纹"), self.model_fingerprint))
+        gestures.add(label(tr("首次成功绑定会自动保存模型；下次启动恢复最近使用的已绑定模型，无需重新导入。识别与手势控制仍需手动开启。"),
+                           "caption", wrap=True))
+        self.saved_model_path = _path_field()
+        gestures.add(field(tr("自动保存的模型"), self.saved_model_path))
         self.bindings_card = Card()
         gestures.add(self.bindings_card)
         self.binding_grid = QGridLayout()
@@ -777,6 +781,8 @@ class PluginsPage(Page):
         self.copy_bindings.setEnabled(p.can_copy_bindings(plugin))
         _set_path(self.model_fingerprint, p.model_fingerprint)
         self.model_fingerprint.setPlaceholderText(resolve(tr("未加载模型")))
+        _set_path(self.saved_model_path, p.saved_model_path or "")
+        self.saved_model_path.setPlaceholderText(resolve(tr("成功绑定后自动保存")))
         for test in self._action_tests:
             test.setEnabled(p.can_test(plugin))
         self.recording_events.setChecked(plugin.recording_events_enabled)

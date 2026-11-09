@@ -253,6 +253,173 @@ class PluginTestCase(unittest.TestCase):
         return self.runtime.reply.call_args.kwargs
 
 
+class BoundModelPersistenceTests(PluginTestCase):
+    def bind(self, offset=0):
+        plugin = self.install()
+        model = self.set_model(offset)
+        self.p.add_binding()
+        self.assertEqual(len(plugin.bindings), 1)
+        return plugin, model
+
+    def test_first_binding_saves_full_model_and_startup_restores_without_activation(self):
+        plugin, model = self.bind()
+        path = self.p.saved_model_path
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.parent, self.root / ".models")
+        self.assertEqual(model_fingerprint(GestureBundle.load(path)), model_fingerprint(model))
+        restored = self.make_controller()
+        self.assertIsNone(restored.bundle, "Construction must not activate or load a model")
+        restored.plugins.start()
+        self.assertEqual(model_fingerprint(restored.bundle), model_fingerprint(model))
+        self.assertTrue(restored.plugins.binding_visible(restored.plugins.plugin(plugin.id).bindings[0]))
+        self.assertEqual(restored.plugins.saved_model_path, path)
+        self.assertEqual(restored.origin, "imported")
+        self.assertFalse(restored.live)
+        self.assertIsNone(restored.recognizer)
+        self.assertFalse(restored.plugins.service_running)
+        self.assertFalse(restored.plugins.gesture_control)
+        restored.plugins.runtime.start.assert_not_called()
+        self.worker.start_remote_recording.assert_not_called()
+        self.network.assert_not_called()
+
+    def test_unexported_trained_model_is_saved_and_restored_as_independent_model(self):
+        plugin = self.install()
+        model = bundle()
+        self.c.set_bundle(model, "trained", "Unsaved trained model")
+        self.p.add_binding()
+        self.c.invalidate("training data changed")
+        self.assertTrue(self.c.stale)
+        self.assertFalse(self.p.can_add_binding(plugin))
+        restored = self.make_controller()
+        restored.plugins.start()
+        restored.invalidate("unrelated local data changed")
+        self.assertFalse(restored.stale)
+        self.assertEqual(model_fingerprint(restored.bundle), model_fingerprint(model))
+
+    def test_no_binding_does_not_create_snapshot_or_startup_selection(self):
+        self.install()
+        self.set_model()
+        self.assertFalse((self.root / ".models").exists())
+        restored = self.make_controller()
+        restored.plugins.start()
+        self.assertIsNone(restored.bundle)
+
+    def test_failed_model_save_does_not_persist_binding_or_replace_last_model(self):
+        plugin, first = self.bind()
+        self.set_model(2)
+        before = list(plugin.bindings)
+        with patch.object(self.p.model_store, "save", side_effect=OSError("disk full")):
+            self.p.add_binding()
+        self.assertEqual(plugin.bindings, before)
+        self.assertEqual(self.p.store.discover()[0].bindings, before)
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(first))
+        self.dialogs.error.assert_called()
+
+    def test_failed_binding_save_does_not_publish_new_startup_model(self):
+        plugin, first = self.bind()
+        self.set_model(2)
+        before = list(plugin.bindings)
+        with patch.object(self.p.store, "save", side_effect=OSError("cannot save binding")):
+            self.p.add_binding()
+        self.assertEqual(plugin.bindings, before)
+        self.assertEqual(self.p.store.discover()[0].bindings, before)
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(first))
+
+    def test_failed_selection_save_rolls_back_binding_on_disk(self):
+        plugin, first = self.bind()
+        self.set_model(2)
+        before = list(plugin.bindings)
+        with patch.object(self.p.model_store, "activate", side_effect=OSError("cannot save selection")):
+            self.p.add_binding()
+        self.assertEqual(plugin.bindings, before)
+        self.assertEqual(self.p.store.discover()[0].bindings, before)
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(first))
+
+    def test_unbound_import_does_not_replace_selected_snapshot_and_manual_load_wins(self):
+        _plugin, first = self.bind()
+        second = self.set_model(3)
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(first))
+        restored = self.make_controller()
+        restored.set_bundle(second, "imported", "Manually chosen model")
+        restored.plugins.start()
+        self.assertIs(restored.bundle, second)
+
+    def test_copy_and_migrate_bindings_save_new_snapshots(self):
+        plugin, first = self.bind()
+        first_path = self.p.saved_model_path
+        second = self.set_model(2)
+        self.p.copy_bindings()
+        self.assertEqual(len(plugin.bindings), 2)
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(second))
+        self.assertTrue(first_path.is_file())
+        third = self.set_model(3)
+        self.p.set_binding_gesture(0, GESTURE)
+        self.assertEqual(plugin.bindings[0].model, model_fingerprint(third))
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(third))
+        self.c.set_bundle(first, "imported", "Use previous bound model")
+        # First model no longer has a binding after migration; do not change selection.
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(third))
+        self.c.set_bundle(second, "imported", "Use another saved bound model")
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(second))
+
+    def test_corrupt_missing_and_mismatched_snapshots_fail_closed(self):
+        _plugin, original = self.bind()
+        path = self.p.saved_model_path
+        for failure in ("corrupt", "missing", "mismatched"):
+            with self.subTest(failure=failure):
+                original.save(path)
+                if failure == "corrupt":
+                    path.write_text("{}", encoding="utf-8")
+                elif failure == "missing":
+                    path.unlink()
+                else:
+                    bundle(10).save(path)
+                restored = self.make_controller()
+                logs = []
+                restored.logged.connect(lambda _time, level, text: logs.append((level, resolve(text))))
+                restored.plugins.start()
+                self.assertIsNone(restored.bundle)
+                self.assertFalse(restored.live)
+                self.assertFalse(restored.plugins.gesture_control)
+                self.assertTrue(any(level == "warning" and "无法自动恢复" in text for level, text in logs))
+
+    def test_legacy_binding_gets_snapshot_when_its_model_is_imported_once(self):
+        plugin = self.install()
+        model = self.set_model()
+        from hmm_gesture_studio.plugins.models import Binding
+        plugin.bindings.append(Binding("legacy", GESTURE, "send", model_fingerprint(model)))
+        self.p._persist(plugin)
+        self.assertFalse((self.root / ".models").exists())
+        self.c.set_bundle(model, "imported", "Previously bound model")
+        self.assertTrue(self.p.saved_model_path.is_file())
+        restored = self.make_controller()
+        restored.plugins.start()
+        self.assertEqual(model_fingerprint(restored.bundle), model_fingerprint(model))
+
+    def test_clear_data_and_uninstall_keep_shared_model_snapshots(self):
+        _plugin, model = self.bind()
+        path = self.p.saved_model_path
+        self.p.clear_data()
+        self.assertTrue(path.is_file())
+        self.p.remove_plugin()
+        self.assertTrue(path.is_file())
+        restored = self.make_controller()
+        restored.plugins.start()
+        self.assertEqual(restored.plugins.plugins, [])
+        self.assertEqual(model_fingerprint(restored.bundle), model_fingerprint(model))
+
+    def test_model_changed_during_duplicate_confirmation_does_not_create_binding(self):
+        plugin, first = self.bind()
+        before = list(plugin.bindings)
+        def confirm(*_args, **_kwargs):
+            self.set_model(2)
+            return True
+        self.dialogs.ask.side_effect = confirm
+        self.p.add_binding()
+        self.assertEqual(plugin.bindings, before)
+        self.assertEqual(model_fingerprint(self.p.model_store.load_active()[0]), model_fingerprint(first))
+
+
 class PluginRulesTests(PluginTestCase):
     def test_empty_discovery_and_start_do_not_enable_services_or_touch_network(self):
         self.assertEqual(self.p.root, self.root)

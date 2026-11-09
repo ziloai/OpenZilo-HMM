@@ -1,0 +1,19 @@
+{
+  "缓存与插件数据": "Cache and plugin data",
+  "清理所有已安装插件的缓存和日志；也可额外清除插件数据。": "Clear cached files and logs for all installed plugins, with an option to also delete plugin data.",
+  "保留插件安装、设置、密钥、绑定和模型，不影响采集数据和宿主录音。": "Keeps plugin installations, settings, credentials, bindings and models. Capture data and Studio recordings are not affected.",
+  "清理缓存": "Clear cache",
+  "清除插件数据": "Clear plugin data",
+  "尚未安装插件，无需清理。": "No plugins installed; nothing to clear.",
+  "请先在插件页停止插件服务，并等待录音和插件操作结束。": "Stop the plugin service on the Plugins page and wait for recordings and plugin operations to finish.",
+  "仅清理 Studio 管理的插件目录，不会清理插件自行写入其他位置的文件。": "Only plugin folders managed by Studio are cleared, not files plugins write elsewhere.",
+  "清除所有插件数据？": "Clear all plugin data?",
+  "清理所有插件缓存？": "Clear all plugin caches?",
+  "将永久删除所有已安装插件的数据、缓存和日志，无法恢复。": "Permanently delete data, cached files and logs for all installed plugins. This cannot be undone.",
+  "将删除所有已安装插件的缓存和日志，保留插件数据。": "Delete cached files and logs for all installed plugins, keeping plugin data.",
+  "{detail}\n保留插件代码、依赖环境、设置、密钥、绑定和模型；不删除采集数据或宿主录音。": "{detail}\nKeeps plugin code, dependency environments, settings, credentials, bindings and models. Capture data and Studio recordings are not deleted.",
+  "清理未全部完成，部分文件可能已删除；请查看错误后重试。": "Cleanup was incomplete; some files may already have been deleted. Review the error and try again.",
+  "已清除所有插件的数据、缓存和日志。": "Cleared data, cached files and logs for all plugins.",
+  "已清理所有插件的缓存和日志。": "Cleared cached files and logs for all plugins.",
+  "正在清理插件存储…": "Cleaning plugin storage…"
+}

@@ -880,9 +880,9 @@ class StudioController(QObject):
     def set_bundle(self, bundle, origin, summary):
         self.stop_live()
         self.bundle = bundle
-        self.plugins.set_model(bundle)
         self.origin = origin
         self.stale = False
+        self.plugins.set_model(bundle)
         mode = tr("短促动作") if bundle.segmentation.mode == "impulse" else tr("连续动作")
         rejection = tr("带拒识标定（非概率）") if bundle.rejection else tr("无拒识标定；单类不能开启自动识别，请重新训练")
         self.model_text = tr("{summary}；手势：{names}；{rate:g} Hz；{mode}，中值 {median} / 低通 {cutoff:g} Hz；{rejection}",

@@ -7,10 +7,8 @@ run on the Qt thread. No network request or plugin import occurs in construction
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime, timezone
-import hashlib
-import json
 from pathlib import Path
 import re
 import sys
@@ -24,6 +22,7 @@ from ..device_history import history_path
 from ..plugins.installer import Installer, dependencies_ready, install_dependencies, python_executable
 from ..plugins.manifest import validate_values
 from ..plugins.models import Binding, PluginEvent, Release, assigned_storage
+from ..plugins.model_store import BoundModelStore, model_fingerprint
 from ..plugins.runtime import Runtime
 from ..plugins.storage import PluginStore
 from .i18n import resolve, tr
@@ -66,25 +65,14 @@ def format_size(size):
     return f"{value:.1f} GB"
 
 
-def model_fingerprint(bundle):
-    """Hash inference content, not filesystem location or training timestamps."""
-    if bundle is None:
-        return ""
-    from hmm_gesture.bundle import _model_arrays
-    content = dict(pipeline=asdict(bundle.pipeline), segmentation=asdict(bundle.segmentation),
-                   gestures=[(name, {key: value.tolist() for key, value in _model_arrays(model).items()})
-                             for name, model in bundle.models.items()],
-                   rejection={name: asdict(value) for name, value in bundle.rejection.items()}
-                   if bundle.rejection is not None else None)
-    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"),
-                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
-
-
 class PluginsController:
     def __init__(self, app, *, root=None, store=None, installer=None, runtime=None):
         self.app = app
         self.root = Path(root) if root is not None else history_path().parent / "plugins"
         self.store = store or PluginStore(self.root)
+        self.model_store = BoundModelStore(self.root)
+        self.saved_model_path = None
+        self._restoring_model = False
         self.installer = installer or Installer(self.store)
         self.runtime = runtime or Runtime(app.events)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="plugin-install")
@@ -110,6 +98,7 @@ class PluginsController:
         self.checking = set()
         self.updating = set()
         self.busy_text = None
+        self.storage_cleanup_status = None
         self._job_token = 0
         self._job_callback = None
         self._fetch_token = 0
@@ -122,8 +111,26 @@ class PluginsController:
 
     def start(self):
         self._warnings()
+        self.restore_bound_model()
         if self.autostart:
             self.set_service_running(True)
+
+    def restore_bound_model(self):
+        if self.app.bundle is not None or self.app.closing:
+            return
+        try:
+            saved = self.model_store.load_active()
+            if saved is None:
+                return
+            bundle, path = saved
+            self._restoring_model = True
+            self.app.set_bundle(bundle, "imported", tr("已自动恢复已绑定模型：{path}", path=path))
+            self.saved_model_path = path
+            self.app.notify()
+        except Exception as exc:
+            self.app.log(tr("无法自动恢复已绑定模型，请重新导入后绑定：{error}", error=str(exc)), "warning")
+        finally:
+            self._restoring_model = False
 
     def _warnings(self):
         warnings = getattr(self.store, "warnings", [])
@@ -215,6 +222,73 @@ class PluginsController:
 
     def can_clear_data(self, plugin):
         return self.can_edit(plugin) and not self.runtime.running(plugin.id)
+
+    @property
+    def can_clear_storage(self):
+        return (bool(self.plugins) and not self.app.closing and self.busy_text is None
+                and not self.service_running and not self.updating
+                and self.recording_session is None and self._after_recording is None
+                and all(not self.runtime.running(p.id) for p in self.plugins))
+
+    @property
+    def storage_cleanup_hint(self):
+        if self.busy_text is not None:
+            return self.busy_text
+        if not self.plugins:
+            return tr("尚未安装插件，无需清理。")
+        if not self.can_clear_storage:
+            return tr("请先在插件页停止插件服务，并等待录音和插件操作结束。")
+        return self.storage_cleanup_status or tr("仅清理 Studio 管理的插件目录，不会清理插件自行写入其他位置的文件。")
+
+    def clear_storage(self, *, include_data=False):
+        """Explicit bulk cleanup; the service must stay stopped throughout."""
+        if not self.can_clear_storage:
+            return
+        plugins = tuple(self.plugins)
+        title = tr("清除所有插件数据？") if include_data else tr("清理所有插件缓存？")
+        detail = (tr("将永久删除所有已安装插件的数据、缓存和日志，无法恢复。") if include_data
+                  else tr("将删除所有已安装插件的缓存和日志，保留插件数据。"))
+        if not self.app.dialogs.ask(title, tr("{detail}\n保留插件代码、依赖环境、设置、密钥、绑定和模型；不删除采集数据或宿主录音。", detail=detail), danger=True):
+            return
+        # The modal dialog runs a nested event loop: recheck identities and rules.
+        if (not self.can_clear_storage or len(plugins) != len(self.plugins)
+                or any(before is not after for before, after in zip(plugins, self.plugins))):
+            return
+        self.storage_cleanup_status = None
+        # Worker copies prevent disk measurements from mutating UI-owned models.
+        snapshots = tuple(replace(plugin) for plugin in plugins)
+
+        def clean():
+            results, errors = {}, []
+            for plugin in snapshots:
+                try:
+                    if include_data:
+                        self.store.clear_data(plugin)
+                    else:
+                        self.store.clear_cache(plugin)
+                except Exception as exc:
+                    errors.append(f"{plugin.id}: {exc}")
+                # Refresh even after partial deletion; never report full success.
+                try:
+                    results[plugin.id] = self.store.refresh_storage(plugin)
+                except Exception:
+                    pass
+            return results, errors
+
+        def done(result):
+            sizes, errors = result
+            for plugin in plugins:
+                if plugin.id in sizes:
+                    plugin.storage = sizes[plugin.id]
+            if errors:
+                self.storage_cleanup_status = tr("清理未全部完成，部分文件可能已删除；请查看错误后重试。")
+                self._error("\n".join(errors))
+            else:
+                self.storage_cleanup_status = (tr("已清除所有插件的数据、缓存和日志。") if include_data
+                                               else tr("已清理所有插件的缓存和日志。"))
+            self.app.log(self.storage_cleanup_status, "warning" if errors else "info")
+
+        self._job(tr("正在清理插件存储…"), clean, done)
 
     def source_text(self, plugin):
         return tr("GitHub · {repo}", repo=plugin.github.repo) if plugin.github else tr("本地快照")
@@ -585,12 +659,23 @@ class PluginsController:
 
     def set_model(self, bundle):
         self.disarm()
+        self.saved_model_path = None
         try:
             self.model_fingerprint = model_fingerprint(bundle)
         except (TypeError, ValueError, AttributeError) as exc:
             self.model_fingerprint = ""
             self.app.log(tr("无法确定模型指纹，插件手势控制不可用：{error}", error=str(exc)), "warning")
         self.gestures = tuple(bundle.gesture_names) if bundle is not None and self.model_fingerprint else ()
+        # Also migrate older persisted bindings when their model is imported once.
+        # An unrelated, unbound model must not replace the startup selection.
+        if (not self._restoring_model and self.model_fingerprint and not self.app.stale
+                and any(b.model == self.model_fingerprint for p in self.plugins for b in p.bindings)):
+            try:
+                path = self.model_store.save(bundle, self.model_fingerprint)
+                self.model_store.activate(self.model_fingerprint)
+                self.saved_model_path = path
+            except Exception as exc:
+                self.app.log(tr("无法自动保存绑定模型：{error}", error=str(exc)), "warning")
 
     def set_enabled(self, plugin_id, enabled):
         plugin = self.plugin(plugin_id)
@@ -703,24 +788,57 @@ class PluginsController:
         return list(self.gestures)
 
     def can_add_binding(self, plugin):
-        return self.can_edit(plugin) and bool(plugin.actions) and bool(self.gestures)
+        return (self.can_edit(plugin) and bool(plugin.actions) and bool(self.gestures)
+                and self.app.bundle is not None and not self.app.stale and not self.app.training)
 
     def binding_visible(self, binding):
         return binding.model == self.model_fingerprint and binding.gesture in self.gestures
+
+    def _persist_model_binding(self, plugin, previous):
+        """A successful binding has both a saved model and a startup selection.
+
+        Save the snapshot first, commit the binding second, then publish the
+        selection. On failure keep the previous bindings/selection. Unreferenced
+        snapshots may remain, but are never selected automatically.
+        """
+        try:
+            if self.app.stale or self.app.training:
+                raise ValueError(tr("当前模型已失效或正在训练，不能保存绑定。"))
+            path = self.model_store.save(self.app.bundle, self.model_fingerprint)
+        except Exception as exc:
+            plugin.bindings = previous
+            self._error(exc)
+            return False
+        if not self._persist(plugin):
+            plugin.bindings = previous
+            return False
+        try:
+            self.model_store.activate(self.model_fingerprint)
+        except Exception as exc:
+            plugin.bindings = previous
+            self._persist(plugin)
+            self._error(exc)
+            return False
+        self.saved_model_path = path
+        self.app.log(tr("已自动保存绑定模型：{path}；下次启动将自动恢复。", path=path))
+        return True
 
     def add_binding(self):
         plugin = self.selected
         if plugin is not None and self.can_add_binding(plugin):
             gesture = self.gestures[0]
+            model = self.model_fingerprint
             if any(b.gesture == gesture and self.binding_visible(b) for p in self.plugins for b in p.bindings):
                 if not self.app.dialogs.ask(tr("此手势已有动作"), tr("继续添加会同时触发多个动作。继续？")):
                     return
-                if self.selected is not plugin or not self.can_add_binding(plugin):
+                if (self.selected is not plugin or not self.can_add_binding(plugin)
+                        or self.model_fingerprint != model or gesture not in self.gestures):
                     return
             action = plugin.actions[0]
+            previous = list(plugin.bindings)
             plugin.bindings.append(Binding(uuid4().hex, gesture, action.key, self.model_fingerprint,
                                            {s.key: s.default for s in action.parameters}))
-            self._persist(plugin)
+            self._persist_model_binding(plugin, previous)
         self.app.notify()
 
     def _change_binding(self, index, **changes):
@@ -728,8 +846,11 @@ class PluginsController:
         if plugin is None or not self.can_edit(plugin) or not 0 <= index < len(plugin.bindings):
             return
         old = plugin.bindings[index]
+        previous = list(plugin.bindings)
         plugin.bindings[index] = replace(old, **changes)
-        if not self._persist(plugin):
+        if "model" in changes:
+            self._persist_model_binding(plugin, previous)
+        elif not self._persist(plugin):
             plugin.bindings[index] = old
         self.runtime.cancel_pending(plugin.id, event_type="gesture")
         self.app.notify()
@@ -738,6 +859,7 @@ class PluginsController:
         if gesture not in self.gestures or self.selected is None:
             return
         binding = self.selected.bindings[index]
+        model = self.model_fingerprint
         if any(b.id != binding.id and b.gesture == gesture and self.binding_visible(b)
                for p in self.plugins for b in p.bindings):
             plugin = self.selected
@@ -745,7 +867,8 @@ class PluginsController:
                 return
             if self.selected is not plugin or index >= len(plugin.bindings) or plugin.bindings[index] is not binding:
                 return
-        self._change_binding(index, gesture=gesture, model=self.model_fingerprint)
+        if self.model_fingerprint == model and gesture in self.gestures:
+            self._change_binding(index, gesture=gesture, model=model)
 
     def set_binding_action(self, index, action):
         if self.selected:
@@ -790,13 +913,15 @@ class PluginsController:
             return
         if self.selected is not plugin or not self.can_add_binding(plugin) or self.model_fingerprint != model:
             return
+        previous = list(plugin.bindings)
         existing = {(b.gesture, b.action) for b in plugin.bindings if b.model == model}
         for binding in list(plugin.bindings):
             key = binding.gesture, binding.action
             if binding.model != model and binding.gesture in self.gestures and key not in existing:
                 plugin.bindings.append(replace(binding, id=uuid4().hex, model=model, parameters=dict(binding.parameters)))
                 existing.add(key)
-        self._persist(plugin)
+        if plugin.bindings != previous:
+            self._persist_model_binding(plugin, previous)
         self.app.notify()
 
     def _submit(self, plugin, action, event, parameters):

@@ -359,11 +359,22 @@ class PluginStore:
                 shutil.rmtree(base)
             self._delete_refs(plugin.id, refs)
 
+    def clear_cache(self, plugin: Plugin):
+        """Clear assigned cache and logs, including the rotated log."""
+        self._clear_storage(plugin, include_data=False)
+
     def clear_data(self, plugin: Plugin):
         """Clear data/cache/log only; preserve code, settings, bindings and venv."""
+        self._clear_storage(plugin, include_data=True)
+
+    def _clear_storage(self, plugin: Plugin, *, include_data: bool):
         with self._lock:
             base = self.base(plugin)
-            paths = [contained_path(base, name) for name in ("data", "cache", "plugin.log")]
+            names = ("cache", "plugin.log", "plugin.log.1")
+            if include_data:
+                names = ("data", *names)
+            # Validate every target before deleting any of this plugin's files.
+            paths = [contained_path(base, name) for name in names]
             for path in paths:
                 if path.is_dir():
                     shutil.rmtree(path)

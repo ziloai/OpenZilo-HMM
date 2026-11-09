@@ -225,5 +225,13 @@
   "录音正在启动或保存，请等待状态稳定后重试。": "Recording is starting or being saved. Wait for the state to settle, then try again.",
   "将永久清空数据与缓存，保留设置和绑定。": "Data and cache will be permanently cleared. Settings and bindings will be kept.",
   "将删除插件托管代码、环境、数据、设置、绑定和密钥。不会删除原始来源目录。": "The plugin's Studio-managed code, environment, data, settings, bindings and secrets will be deleted. The original source folder will not be deleted.",
-  "请先连接设备并等待 IMU 恢复上报；维护或手势采集期间不能试识别。": "Connect the device and wait for IMU data reporting to resume. Test recognition is unavailable during maintenance or gesture capture."
+  "请先连接设备并等待 IMU 恢复上报；维护或手势采集期间不能试识别。": "Connect the device and wait for IMU data reporting to resume. Test recognition is unavailable during maintenance or gesture capture.",
+  "已自动恢复已绑定模型：{path}": "Automatically restored the bound model: {path}",
+  "无法自动恢复已绑定模型，请重新导入后绑定：{error}": "Could not restore the bound model. Import it again and create a binding: {error}",
+  "无法自动保存绑定模型：{error}": "Could not automatically save the bound model: {error}",
+  "当前模型已失效或正在训练，不能保存绑定。": "The current model is stale or training is in progress. The binding cannot be saved.",
+  "已自动保存绑定模型：{path}；下次启动将自动恢复。": "Bound model saved automatically: {path}. It will be restored at the next startup.",
+  "首次成功绑定会自动保存模型；下次启动恢复最近使用的已绑定模型，无需重新导入。识别与手势控制仍需手动开启。": "The first successful binding saves a model snapshot. The most recently used bound model is restored at startup, without importing it again. Recognition and gesture control must still be enabled manually.",
+  "自动保存的模型": "Saved model snapshot",
+  "成功绑定后自动保存": "Saved automatically after a successful binding"
 }
