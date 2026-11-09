@@ -12,14 +12,16 @@ from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLineEdit, QTableWidgetI
 
 from .. import theme
 from ..i18n import resolve, tr
-from ..plugins_controller import format_size
+from ..motion import Busy
+from ..plugins_controller import format_size, join_titles
 from ..widgets import (
-    Card, Combo, Page, StatTile, Switch, button, field, hairline, label, line_edit, row, set_field_text, set_text,
+    Card, Combo, Page, ReadOnlyText, StatTile, Switch, button, field, hairline, label, line_edit, row, set_field_text, set_text,
     set_tone, table,
 )
 
 _PREVIEW_NOTE = tr("界面预览：这里全部是示例数据，不会运行插件代码或写入磁盘，修改在关闭 Studio 后丢失。")
 _CONTROL_WIDTH = 280
+_CHANNELS = (("stable", tr("正式版")), ("prerelease", tr("包含预发布版")))
 
 
 def _clear(layout):
@@ -74,8 +76,10 @@ class _PluginCard(Card):
         self.meta = label(_meta(plugin), "caption", selectable=True)
         self.add(self.meta)
         self.add(label(plugin.description, wrap=True))
-        self.summary = label(role="caption")
+        self.summary = label(role="caption", wrap=True)
         self.add(self.summary)
+        self.update_badge = label(role="caption", tone="warning", wrap=True)
+        self.add(self.update_badge)
 
     def render_state(self, plugins):
         plugin = self.plugin
@@ -85,8 +89,12 @@ class _PluginCard(Card):
         set_text(self.meta, _meta(plugin))
         self.enabled.setChecked(plugin.enabled)
         self.enabled.setEnabled(plugins.can_toggle(plugin))
-        set_text(self.summary, tr("手势绑定：{bindings} · 数据：{size}", bindings=len(plugin.bindings),
-                                  size=format_size(plugin.data_size)))
+        badge = plugins.update_badge(plugin)
+        self.update_badge.setVisible(badge is not None)
+        if badge is not None:
+            set_text(self.update_badge, badge)
+        set_text(self.summary, tr("{origin} · 手势绑定：{bindings} · 数据：{size}", origin=plugins.source_text(plugin),
+                                  bindings=len(plugin.bindings), size=format_size(plugin.data_size)))
 
 
 class PluginsPage(Page):
@@ -99,6 +107,7 @@ class PluginsPage(Page):
         self._bindings_key = None
         self._setting_controls = []
         self._size_labels = []
+        self._permissions_shown = None
         self._build_list()
         self._build_detail()
         self.finish()
@@ -114,15 +123,36 @@ class PluginsPage(Page):
         self.enabled = StatTile(tr("已启用"))
         self.bindings = StatTile(tr("手势绑定"))
         self.total_size = StatTile(tr("数据占用"))
-        section.add(row(self.registered, self.enabled, self.bindings, self.total_size, spacing=64))
-        self.register = button(tr("注册插件…"), p.begin_registration, kind="primary")
-        section.add(row(self.register))
+        self.updates = StatTile(tr("可更新"))
+        section.add(row(self.registered, self.enabled, self.updates, self.bindings, self.total_size, spacing=64))
+        self.add_github = button(tr("从 GitHub 添加"), p.open_github_form, kind="primary")
+        self.add_local = button(tr("从本地目录添加…"), p.begin_registration)
+        self.check_all = button(tr("检查更新"), p.check_updates)
+        self.check_all_busy = Busy(tr("正在检查更新…"))
+        section.add(row(self.add_github, self.add_local, self.check_all, self.check_all_busy))
+        section.add(self._build_github_form())
         section.add(self._build_candidate())
         self.empty = label(tr("还没有注册插件。"), tone="muted")
         section.add(self.empty)
         self.list_layout = QVBoxLayout()
         self.list_layout.setSpacing(theme.ELEMENT_GAP)
         section.add(self.list_layout)
+
+    def _build_github_form(self):
+        p = self.plugins
+        card = self.github_card = Card(tr("从 GitHub 添加插件"))
+        self.github_input = line_edit(on_edit=p.set_github_input,
+                                      placeholder=tr("owner/repo 或 https://github.com/owner/repo"))
+        self.github_input.setAccessibleName(resolve(tr("仓库地址")))
+        self.github_input.returnPressed.connect(p.fetch_github)
+        card.add(field(tr("仓库地址"), self.github_input))
+        self.github_error = label(role="caption", tone="critical", wrap=True)
+        card.add(self.github_error)
+        self.github_fetch = button(tr("读取插件信息"), p.fetch_github, kind="primary")
+        self.github_busy = Busy(tr("正在读取仓库信息…"))
+        card.add(row(self.github_fetch, button(tr("取消"), p.close_github_form), self.github_busy))
+        card.hide()
+        return card
 
     def _build_candidate(self):
         p = self.plugins
@@ -134,12 +164,21 @@ class PluginsPage(Page):
         self.candidate_description = label(wrap=True)
         card.add(self.candidate_description)
         self.candidate_source = _path_field()
-        card.add(field(tr("插件目录"), self.candidate_source))
+        source_box = QVBoxLayout()
+        source_box.setSpacing(4)
+        self.candidate_source_caption = label(role="caption")
+        source_box.addWidget(self.candidate_source_caption)
+        source_box.addWidget(self.candidate_source)
+        card.add(source_box)
         self.candidate_data = _path_field()
         card.add(field(tr("Studio 将分配的数据目录"), self.candidate_data))
         self.candidate_permissions = label(wrap=True)
         card.add(field(tr("请求的权限"), self.candidate_permissions))
-        card.add(label(tr("示例清单：尚未读取你选择的目录。"), "caption", tone="warning", wrap=True))
+        self.candidate_auto = Switch(tr("自动更新"))
+        self.candidate_auto.toggled.connect(p.set_candidate_auto_update)
+        card.add(self.candidate_auto)
+        self.candidate_note = label(role="caption", tone="warning", wrap=True)
+        card.add(self.candidate_note)
         self.candidate_confirm = button(tr("确认注册"), p.confirm_registration, kind="primary")
         card.add(row(self.candidate_confirm, button(tr("取消"), p.cancel_registration)))
         card.hide()
@@ -151,7 +190,12 @@ class PluginsPage(Page):
         self.enabled.set_value(str(p.enabled_count))
         self.bindings.set_value(str(p.binding_count))
         self.total_size.set_value(format_size(p.total_size))
-        self.register.setEnabled(p.can_register)
+        self.updates.set_value(str(p.update_count))
+        self.add_github.setEnabled(p.can_register)
+        self.add_local.setEnabled(p.can_register)
+        self.check_all.setEnabled(p.can_check_all)
+        self.check_all_busy.set_busy(bool(p.checking))
+        self._render_github_form()
         self.empty.setVisible(not p.plugins)
         ids = [plugin.id for plugin in p.plugins]
         if ids != list(self._cards):
@@ -168,8 +212,26 @@ class PluginsPage(Page):
             set_text(self.candidate_meta, _meta(candidate))
             set_text(self.candidate_description, candidate.description)
             _set_path(self.candidate_source, candidate.source)
+            from_github = candidate.github is not None
+            set_text(self.candidate_source_caption, tr("仓库地址") if from_github else tr("插件目录"))
+            set_text(self.candidate_note, tr("示例清单：尚未访问 GitHub。插件会在本机运行第三方代码，请只添加你信任的仓库。")
+                     if from_github else tr("示例清单：尚未读取你选择的目录。"))
+            self.candidate_auto.setVisible(from_github)
+            if from_github:
+                self.candidate_auto.setChecked(candidate.github.auto_update)
             _set_path(self.candidate_data, candidate.storage[0].path)
-            set_text(self.candidate_permissions, resolve(tr("、")).join(resolve(item.title) for item in candidate.permissions))
+            set_text(self.candidate_permissions, join_titles(candidate.permissions))
+
+    def _render_github_form(self):
+        p = self.plugins
+        self.github_card.setVisible(p.github_form_open)
+        set_field_text(self.github_input, p.github_input)
+        self.github_input.setEnabled(not p.github_fetching)
+        self.github_fetch.setEnabled(p.can_fetch_github)
+        self.github_busy.set_busy(p.github_fetching)
+        self.github_error.setVisible(p.github_error is not None)
+        if p.github_error is not None:
+            set_text(self.github_error, p.github_error)
 
     # Detail.
 
@@ -199,6 +261,8 @@ class PluginsPage(Page):
         self.setting_tile = StatTile(tr("设置项"))
         self.size_tile = StatTile(tr("数据占用"))
         head.add(row(self.binding_tile, self.action_tile, self.setting_tile, self.size_tile, spacing=64))
+
+        source = self._build_source_section()
 
         settings = self.settings_section = self.add_section()
         settings.add(label(tr("插件设置"), "section"))
@@ -262,12 +326,114 @@ class PluginsPage(Page):
         self.events_table.setColumnWidth(2, 220)
         events.add(self.events_table)
 
-        self._detail_sections = (head, settings, gestures, storage, permissions, events)
+        self._detail_sections = (head, source, settings, gestures, storage, permissions, events)
+
+    def _build_source_section(self):
+        p = self.plugins
+        section = self.source_section = self.add_section()
+        section.add(label(tr("来源与更新"), "section"))
+        card = Card()
+        section.add(card)
+
+        self.local_box = QWidget()
+        local = QVBoxLayout(self.local_box)
+        local.setContentsMargins(0, 0, 0, 0)
+        local.setSpacing(theme.ELEMENT_GAP)
+        self.local_path = _path_field()
+        local.addLayout(field(tr("本地目录"), self.local_path))
+        local.addWidget(label(tr("本地目录中的插件不会自动更新；修改代码后请重新加载。"), "caption", wrap=True))
+        card.add(self.local_box)
+
+        self.github_box = QWidget()
+        box = QVBoxLayout(self.github_box)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(theme.ELEMENT_GAP)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(theme.ELEMENT_GAP)
+        grid.setVerticalSpacing(theme.ELEMENT_GAP)
+        grid.setColumnStretch(1, 1)
+        self.repo_path = _path_field()
+        self.repo_path.setAccessibleName(resolve(tr("仓库地址")))
+        self.channel = Combo()
+        self.channel.setFixedWidth(_CONTROL_WIDTH)
+        self.channel.setAccessibleName(resolve(tr("更新通道")))
+        for value, text in _CHANNELS:
+            self.channel.addItem(resolve(text), value)
+        self.channel.activated.connect(lambda index: p.set_channel(self.channel.itemData(index)))
+        self.installed = label(selectable=True)
+        self.last_checked = label()
+        for index, (caption, widget) in enumerate(((tr("仓库地址"), self.repo_path), (tr("更新通道"), self.channel),
+                                                   (tr("当前版本"), self.installed), (tr("上次检查"), self.last_checked))):
+            grid.addWidget(label(caption), index, 0)
+            grid.addWidget(widget, index, 1, Qt.AlignmentFlag.AlignLeft if widget is not self.repo_path
+                           else Qt.AlignmentFlag(0))
+        box.addLayout(grid)
+        box.addWidget(hairline())
+        auto = QHBoxLayout()
+        auto.setSpacing(24)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addWidget(label(tr("自动更新")))
+        text.addWidget(label(tr("发现新版本时在后台安装。新版本增加权限时会暂停，等你确认后才安装。"), "caption", wrap=True))
+        auto.addLayout(text, 1)
+        self.auto_update = Switch()
+        self.auto_update.setAccessibleName(resolve(tr("自动更新")))
+        self.auto_update.toggled.connect(p.set_auto_update)
+        auto.addWidget(self.auto_update, 0, Qt.AlignmentFlag.AlignVCenter)
+        box.addLayout(auto)
+        box.addWidget(hairline())
+        self.update_status = label(role="strong", wrap=True)
+        self.update_busy = Busy(tr("正在检查更新…"))
+        box.addWidget(self.update_status)
+        box.addWidget(self.update_busy, 0, Qt.AlignmentFlag.AlignLeft)
+        self.notes_title = label(role="caption")
+        box.addWidget(self.notes_title)
+        self.notes = ReadOnlyText(height=64)
+        box.addWidget(self.notes)
+        self.new_permissions = label(tone="warning", wrap=True)
+        box.addWidget(self.new_permissions)
+        self.install = button(tr("立即更新"), lambda: p.install_update(p.selected_id), kind="primary")
+        self.check = button(tr("检查更新"), lambda: p.check_updates(p.selected_id))
+        box.addLayout(row(self.install, self.check))
+        card.add(self.github_box)
+        return section
+
+    def _render_source(self, plugin):
+        p = self.plugins
+        github = plugin.github
+        self.local_box.setVisible(github is None)
+        self.github_box.setVisible(github is not None)
+        if github is None:
+            _set_path(self.local_path, plugin.source)
+            return
+        _set_path(self.repo_path, plugin.source)
+        with QSignalBlocker(self.channel):
+            self.channel.setCurrentIndex(self.channel.findData(github.channel))
+        set_text(self.installed, f"v{plugin.version} ({github.commit})")
+        set_text(self.last_checked, github.last_checked)
+        self.auto_update.setChecked(github.auto_update)
+        busy = p.update_busy_text(plugin)
+        self.update_busy.set_busy(busy is not None, busy if busy is not None else "")
+        self.update_status.setVisible(busy is None)
+        text, tone = p.update_status(plugin)
+        set_text(self.update_status, text)
+        set_tone(self.update_status, tone)
+        release = github.update
+        for widget in (self.notes_title, self.notes, self.install):
+            widget.setVisible(release is not None)
+        self.new_permissions.setVisible(release is not None and bool(release.new_permissions))
+        if release is not None:
+            set_text(self.notes_title, tr("v{version} 更新内容 · {commit}", version=release.version, commit=release.commit))
+            self.notes.set_value(release.notes)
+            if release.new_permissions:
+                set_text(self.new_permissions, tr("新版本新增权限：{permissions}。需要你确认后才会安装。",
+                                                  permissions=join_titles(release.new_permissions)))
+        self.install.setEnabled(p.can_install(plugin))
+        self.check.setEnabled(p.can_check(plugin))
 
     def _rebuild_detail(self, plugin):
         self._build_setting_rows(plugin)
         self._build_storage_rows(plugin)
-        self._build_permission_rows(plugin)
         self._fill_events(plugin)
         self._bindings_key = None
 
@@ -430,6 +596,11 @@ class PluginsPage(Page):
             set_text(self.detail_error, plugin.error)
         self.detail_enabled.setChecked(plugin.enabled)
         self.detail_enabled.setEnabled(p.can_toggle(plugin))
+        self.remove.setEnabled(p.can_remove(plugin))
+        if self._permissions_shown != (plugin.id, plugin.permissions):
+            self._permissions_shown = (plugin.id, plugin.permissions)
+            self._build_permission_rows(plugin)
+        self._render_source(plugin)
         self.binding_tile.set_value(str(len(plugin.bindings)))
         self.action_tile.set_value(str(len(plugin.actions)))
         self.setting_tile.set_value(str(len(plugin.settings)))
@@ -446,6 +617,10 @@ class PluginsPage(Page):
     def retranslate(self):
         # Combo items and table cells hold resolved text; rebuild them in the new language.
         self._detail_for = None
+        self._permissions_shown = None
+        with QSignalBlocker(self.channel):
+            for index, (_value, text) in enumerate(_CHANNELS):
+                self.channel.setItemText(index, resolve(text))
 
     def render_state(self):
         plugin = self.plugins.selected

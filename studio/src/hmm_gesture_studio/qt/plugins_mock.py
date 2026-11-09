@@ -2,7 +2,8 @@
 """Sample plugins for the UI preview; nothing here is loaded, executed or written.
 
 The dataclasses sketch what a manifest would declare. Replace mock_plugins() and
-mock_candidate() with real discovery when the plugin runtime exists. Real plugins
+the mock_*candidate() functions with real discovery when the plugin runtime exists;
+no GitHub request is made here. Real plugins
 would supply their own localized text; samples use tr() so the preview follows
 the interface language.
 """
@@ -58,6 +59,24 @@ class StorageSlot:
     is_directory: bool = True
 
 
+@dataclass(frozen=True)
+class Release:
+    version: str
+    commit: str
+    notes: str
+    new_permissions: tuple = ()
+
+
+@dataclass
+class GitHubSource:
+    repo: str  # owner/name
+    commit: str
+    last_checked: str
+    channel: str = "stable"  # stable | prerelease
+    auto_update: bool = True
+    update: Release | None = None
+
+
 @dataclass
 class Plugin:
     id: str
@@ -73,7 +92,8 @@ class Plugin:
     storage: list = field(default_factory=list)
     enabled: bool = False
     error: str = ""
-    source: str = ""
+    source: str = ""  # Local folder, or the repository URL when github is set.
+    github: GitHubSource | None = None
     values: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -96,6 +116,15 @@ def assigned_storage(root, plugin_id, *, data=0, cache=0, settings=0, log=0):
             StorageSlot("log", tr("日志文件"), base / "plugin.log", log, False)]
 
 
+def github_plugin_id(repo):
+    return "github." + repo.replace("/", ".").lower()
+
+
+def _github(repo, commit, **values):
+    return dict(source=f"https://github.com/{repo}",
+                github=GitHubSource(repo, commit, tr("今天 {time}", time="09:12"), **values))
+
+
 _GESTURE_EVENTS = Permission(tr("接收手势事件"), tr("手势名称和时间戳，不含原始 IMU 数据。"))
 
 
@@ -107,6 +136,8 @@ def mock_plugins(root):
         Plugin(
             id=media, name=tr("媒体控制"), version="1.2.0", author=tr("OpenZilo 示例"),
             description=tr("用手势控制系统媒体的播放、切歌和音量。"), enabled=True,
+            **_github("example-user/media-control", "a1b2c3d", auto_update=False,
+                      update=Release("1.3.0", "9e8f7a6", tr("修复切歌时偶尔重复触发的问题；新增静音动作。"))),
             settings=(
                 SettingSpec("target", tr("控制目标"), "choice", "system", tr("手势触发时发送到哪个播放器。"),
                             options=(("system", tr("系统当前会话")), ("browser", tr("浏览器")))),
@@ -126,6 +157,9 @@ def mock_plugins(root):
         Plugin(
             id=webhook, name=tr("Webhook 转发"), version="0.4.1", author=tr("OpenZilo 示例"),
             description=tr("把识别到的手势发送到你配置的 HTTP 地址，用于连接自动化服务。"),
+            **_github("example-user/gesture-webhook", "4d5e6f0",
+                      update=Release("0.5.0", "c0d1e2f", tr("支持把事件写入本地队列，网络恢复后补发。"),
+                                     (Permission(tr("后台运行"), tr("Studio 窗口关闭时继续补发事件。"), True),))),
             settings=(
                 SettingSpec("url", tr("目标地址"), "text", "https://example.com/hook",
                             tr("只有识别结果会发送到这个地址。")),
@@ -141,6 +175,7 @@ def mock_plugins(root):
         Plugin(
             id=slides, name=tr("演示翻页"), version="2.0.0", author=tr("OpenZilo 示例"),
             description=tr("演示时用手势翻到上一页或下一页。"),
+            source=str(Path.home() / "dev" / "slides-plugin"),
             error=tr("清单声明的入口文件 main.py 不存在。"),
             settings=(SettingSpec("loop", tr("末页后回到首页"), "switch", False),),
             actions=(Action("next_slide", tr("下一页")), Action("previous_slide", tr("上一页"))),
@@ -157,6 +192,20 @@ def mock_candidate(root, source):
     return Plugin(
         id=plugin_id, name=tr("专注计时"), version="0.1.0", author=tr("OpenZilo 示例"),
         description=tr("用手势开始或结束一段专注计时，并把记录保存到自己的数据目录。"), source=str(source),
+        settings=(SettingSpec("minutes", tr("默认时长（分钟）"), "number", "25", minimum=1, maximum=180),),
+        actions=(Action("start", tr("开始计时")), Action("stop", tr("结束计时"))),
+        permissions=(_GESTURE_EVENTS,),
+        storage=assigned_storage(root, plugin_id),
+    )
+
+
+def mock_github_candidate(root, repo):
+    """The sample manifest shown for any repository; GitHub is not contacted."""
+    plugin_id = github_plugin_id(repo)
+    return Plugin(
+        id=plugin_id, name=tr("专注计时"), version="0.1.0", author=repo.split("/")[0],
+        description=tr("用手势开始或结束一段专注计时，并把记录保存到自己的数据目录。"),
+        **_github(repo, "f00c1a7"),
         settings=(SettingSpec("minutes", tr("默认时长（分钟）"), "number", "25", minimum=1, maximum=180),),
         actions=(Action("start", tr("开始计时")), Action("stop", tr("结束计时"))),
         permissions=(_GESTURE_EVENTS,),
