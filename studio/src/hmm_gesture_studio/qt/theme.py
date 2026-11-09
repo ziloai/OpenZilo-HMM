@@ -92,6 +92,7 @@ QLineEdit, QComboBox {{ font-size: 13px; background: {GALLERY_WHITE}; color: {IN
   border-radius: 16px; min-height: 30px; max-height: 30px; padding: 0 14px;
   selection-background-color: {PRICING_BLUE}; selection-color: {GALLERY_WHITE}; }}
 QLineEdit:focus, QComboBox:focus {{ border: 1px solid {PRICING_BLUE}; }}
+QLineEdit:read-only {{ background: {STUDIO_MIST}; border-color: {CONTROL_GRAY}; }}
 QLineEdit:disabled, QComboBox:disabled {{ color: {STEEL}; border-color: {CONTROL_GRAY}; background: {PAPER_FROST}; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{ image: none; }}

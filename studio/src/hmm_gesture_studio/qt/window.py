@@ -22,13 +22,14 @@ from .pages.capture import CapturePage
 from .pages.device import DevicePage
 from .pages.diagnostics import DiagnosticsPage
 from .pages.live import LivePage
+from .pages.plugins import PluginsPage
 from .pages.tools import ToolsPage
 from .pages.train import TrainPage
 from .pages.settings import SettingsPage
 from .widgets import button, label, set_text, set_tone
 
 NAV = (("capture", "采集"), ("train", "训练"), ("live", "实时"), ("diagnostics", "诊断"),
-       ("audio", "录音"), ("tools", "设备工具"))
+       ("audio", "录音"), ("tools", "设备工具"), ("plugins", "插件"))
 LOG_LINES = 1500
 LOG_HEIGHT = 240
 SIDEBAR_TOP = 20
@@ -287,7 +288,7 @@ class MainWindow(QMainWindow):
         self.pages = {}
         for name, page_class in (("capture", CapturePage), ("train", TrainPage), ("live", LivePage),
                                  ("diagnostics", DiagnosticsPage), ("audio", AudioPage), ("tools", ToolsPage),
-                                 ("device", DevicePage), ("about", AboutPage), ("settings", SettingsPage)):
+                                 ("plugins", PluginsPage), ("device", DevicePage), ("about", AboutPage), ("settings", SettingsPage)):
             page = page_class(self.controller, self.navigate)
             self.pages[name] = page
             self.stack.addWidget(page)
@@ -390,10 +391,15 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._place_nav_indicator(animate=False)
 
+    def fade_content(self):
+        """Fade from what is shown now; also for a page that swaps its own views."""
+        if self.isVisible():
+            self._fade.play(self.stack.grab())
+
     def navigate(self, name):
         target = self.pages[name]
-        if self.isVisible() and self.stack.currentWidget() is not target:
-            self._fade.play(self.stack.grab())
+        if self.stack.currentWidget() is not target:
+            self.fade_content()
         self.stack.setCurrentWidget(target)
         self._fade.raise_()
         self._current_page = name

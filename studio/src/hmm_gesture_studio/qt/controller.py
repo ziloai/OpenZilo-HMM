@@ -21,6 +21,7 @@ from hmm_gesture import GestureBundle, GestureRecognizer, PipelineConfig, Segmen
 from ..datasets import GestureDataset, dataset_path, load_dataset, save_dataset
 from .i18n import Text, resolve, tr
 from .models import AccelerationModel, LiveStreamModel, analyze_recording
+from .plugins_controller import PluginsController
 from .tools_controller import ToolsController
 
 MIN_TAKE_SAMPLES = 12
@@ -91,6 +92,7 @@ class StudioController(QObject):
         self.directory = Path(directory) if directory is not None else Path.cwd() / "gestures"
         self.audio_directory = Path(audio_directory) if audio_directory is not None else Path.cwd() / "audio"
         self.tools = ToolsController(self)
+        self.plugins = PluginsController(self)
         self.stream = LiveStreamModel()
         self.acceleration = AccelerationModel()
         self.params = dict(PARAM_DEFAULTS)
