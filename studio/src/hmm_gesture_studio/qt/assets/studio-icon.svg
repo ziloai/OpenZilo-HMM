@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>OpenZilo Studio</title>
+  <desc>A blue Z-shaped motion trace with two tracking endpoints on a light rounded tile.</desc>
+  <rect x="64" y="64" width="896" height="896" rx="204" fill="#f5f5f7" stroke="#e6e6e8" stroke-width="2"/>
+  <path d="M 304 352 H 720 L 304 672 H 720" fill="none" stroke="#0071e3" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#0071e3">
+    <circle cx="304" cy="352" r="44"/>
+    <circle cx="720" cy="672" r="44"/>
+  </g>
+</svg>

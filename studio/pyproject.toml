@@ -31,4 +31,4 @@ hmm-gesture = { workspace = true }
 where = ["src"]
 
 [tool.setuptools.package-data]
-hmm_gesture_studio = ["qt/locales/*.json"]
+hmm_gesture_studio = ["qt/locales/*.json", "qt/assets/*.png", "qt/assets/*.svg"]

@@ -4,6 +4,18 @@ from __future__ import annotations
 
 import os
 import sys
+from importlib.resources import files
+
+
+def application_icon():
+    """Load the packaged PNG eagerly, including when resources live in a ZIP."""
+    from PySide6.QtGui import QIcon, QPixmap
+
+    data = files("hmm_gesture_studio").joinpath("qt/assets/studio-icon.png").read_bytes()
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(data, "PNG"):
+        raise RuntimeError("Cannot load Studio application icon")
+    return QIcon(pixmap)
 
 
 def main() -> None:
@@ -20,6 +32,7 @@ def main() -> None:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("OpenZilo Studio")
+    app.setWindowIcon(application_icon())
     language_manager.initialize()
     apply_theme(app)
     try:
