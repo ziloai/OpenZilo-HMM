@@ -316,6 +316,20 @@ class ToolsController:
             self.app.audioFieldsChanged.emit()
         elif event == "recording_status":
             self.recording_text = tr(payload)
+        elif event == "firmware_connection_latency":
+            # Connection tuning is neither an OTA result nor an unlock event.
+            if not self.firmware_locked:
+                return True
+            status = payload.get("status")
+            messages = {
+                "requested": tr("已请求 macOS OTA 低延迟连接（私有接口）；实际参数由系统协商，尚未确认生效。"),
+                "unavailable": tr("当前连接不支持 macOS 低延迟请求；沿用当前连接参数继续升级。"),
+                "failed": tr("macOS 低延迟请求未能完成；连接参数继续由系统管理，仍将尝试升级。"),
+            }
+            if status not in messages:
+                return True
+            self.firmware_status = messages[status]
+            self.app.log(self.firmware_status, level="info" if status == "requested" else "warning")
         elif event == "firmware_progress":
             sent, total = payload["sent"], payload["total"]
             self.progress = min(100.0, max(0.0, sent / total * 100)) if total else 0.0

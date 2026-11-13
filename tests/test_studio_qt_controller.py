@@ -6,7 +6,7 @@ from concurrent.futures import Future
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 from hmm_gesture import GestureBundle
@@ -657,6 +657,36 @@ class ToolAndAudioTests(Base):
         t.install_firmware()
         self.assertFalse(t.firmware_locked)
         self.assertIn("未开始升级", t.firmware_status)
+
+    def test_connection_latency_status_never_confirms_upgrade_or_unlocks(self):
+        self.connect()
+        t = self.c.tools
+        t.tool_state = "firmware"
+        t.progress = 12
+        for status, text, level in (
+                ("requested", "尚未确认生效", "info"),
+                ("unavailable", "沿用当前连接参数", "warning"),
+                ("failed", "仍将尝试升级", "warning")):
+            with self.subTest(status=status), patch.object(self.c, "log") as log:
+                self.assertTrue(t.handle("firmware_connection_latency", {"status": status}))
+                self.assertIn(text, t.firmware_status)
+                self.assertTrue(t.firmware_locked)
+                self.assertEqual(t.progress, 12)
+                self.assertFalse(self.c.can_disconnect)
+                log.assert_called_once_with(t.firmware_status, level=level)
+        self.worker.disconnect.assert_not_called()
+        t.handle("tool_state", {"state": "idle", "message": "结束"})
+        self.assertFalse(t.firmware_locked)
+
+    def test_stale_or_unknown_connection_latency_event_is_ignored(self):
+        t = self.c.tools
+        previous = t.firmware_status
+        with patch.object(self.c, "log") as log:
+            t.handle("firmware_connection_latency", {"status": "requested"})
+            t.tool_state = "firmware"
+            t.handle("firmware_connection_latency", {"status": "unknown"})
+            log.assert_not_called()
+        self.assertEqual(t.firmware_status, previous)
 
     def test_progress_at_100_percent_is_not_reported_as_success(self):
         t = self.c.tools

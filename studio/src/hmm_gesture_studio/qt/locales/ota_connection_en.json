@@ -1,0 +1,5 @@
+{
+  "已请求 macOS OTA 低延迟连接（私有接口）；实际参数由系统协商，尚未确认生效。": "Requested a low-latency macOS OTA connection through a private API; parameters are negotiated by the system and the change is not yet confirmed.",
+  "当前连接不支持 macOS 低延迟请求；沿用当前连接参数继续升级。": "This connection does not support the macOS low-latency request; continuing the update with the current connection parameters.",
+  "macOS 低延迟请求未能完成；连接参数继续由系统管理，仍将尝试升级。": "The macOS low-latency request could not be completed; the system still manages connection parameters and the update will still be attempted."
+}

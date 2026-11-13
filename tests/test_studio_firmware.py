@@ -61,6 +61,9 @@ class FirmwareTests(unittest.IsolatedAsyncioTestCase):
         self.key_path.write_bytes(self.key_bytes)
         self.ring = Mock(spec=sdk.OpenZiloClient)
         self.emit = Mock()
+        latency = patch.object(firmware, "request_ota_low_latency", return_value="not_applicable")
+        self.latency = latency.start()
+        self.addCleanup(latency.stop)
         self.info = sdk.SystemInfo("V2.001.0002.0002-prod-12345678", 0, 0, 0, 90, False, "sn", "cpu", "Open Zilo")
 
     def inspect(self):
@@ -77,6 +80,7 @@ class FirmwareTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(value, verified.summary)
         with self.assertRaises(FrozenInstanceError):
             verified.bundle = b"changed"
+        self.latency.assert_not_called()
 
     def test_test_firmware_rejected_before_install(self):
         self.bundle_path.write_bytes(signed_bundle(self.key, "test"))
@@ -111,6 +115,40 @@ class FirmwareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.emit.call_args_list[0].args, ("firmware_progress", {"sent": 12, "total": 100}))
         self.assertEqual(self.emit.call_args.args[0], "firmware_complete")
         self.assertIn(self.info.firmware_version, self.emit.call_args.args[1])
+
+    async def test_latency_request_precedes_sdk_update_without_changing_ota_arguments(self):
+        verified = self.inspect()
+        for status in ("requested", "unavailable", "failed", "not_applicable"):
+            with self.subTest(status=status):
+                self.emit.reset_mock()
+                order = []
+                self.latency.reset_mock()
+                self.latency.side_effect = lambda ring: order.append(("latency", ring)) or status
+                async def update(ring, bundle, **kwargs):
+                    order.append(("ota", ring))
+                    self.assertEqual(bundle, verified.bundle)
+                    self.assertEqual(set(kwargs), {"trusted_public_key", "allow_test_firmware", "progress"})
+                    self.assertFalse(any(c.args[0] == "firmware_complete" for c in self.emit.call_args_list))
+                    return self.info
+                with patch.object(sdk, "update_firmware", new=AsyncMock(side_effect=update)) as install:
+                    result = await firmware.install_firmware(self.ring, verified, emit=self.emit)
+                self.assertIs(result, self.info)
+                self.assertEqual(order, [("latency", self.ring), ("ota", self.ring)])
+                self.latency.assert_called_once_with(self.ring)
+                install.assert_awaited_once()
+                events = [call.args[0] for call in self.emit.call_args_list]
+                self.assertEqual(events, (["firmware_connection_latency"] if status != "not_applicable" else [])
+                                 + ["firmware_complete"])
+                if status != "not_applicable":
+                    self.assertEqual(self.emit.call_args_list[0].args,
+                                     ("firmware_connection_latency", {"status": status}))
+
+    async def test_submitted_latency_request_is_not_upgrade_success(self):
+        self.latency.return_value = "requested"
+        with patch.object(sdk, "update_firmware", new=AsyncMock(side_effect=sdk.TimeoutError("unconfirmed"))):
+            with self.assertRaises(sdk.TimeoutError):
+                await firmware.install_firmware(self.ring, self.inspect(), emit=self.emit)
+        self.assertEqual([c.args[0] for c in self.emit.call_args_list], ["firmware_connection_latency"])
 
     async def test_failure_or_cancel_even_after_transfer_never_reports_success(self):
         verified = self.inspect()

@@ -213,6 +213,24 @@ class WindowLanguageTests(unittest.TestCase):
         self.assertEqual(self.dialogs.error.call_count, 2)
         self.assertIn("firmware", i18n.resolve(self.dialogs.error.call_args.args[1]).lower())
 
+    def test_ota_connection_request_retranslates_without_claiming_success(self):
+        c = self.controller
+        c.tools.tool_state = "firmware"
+        self.window.navigate("tools")
+        c.handle("firmware_connection_latency", {"status": "requested"})
+        self.pump()
+        self.assertIn("尚未确认生效", self.window.pages["tools"].firmware_status.text())
+        self.choose("en")
+        text = self.window.pages["tools"].firmware_status.text()
+        self.assertIn("not yet confirmed", text)
+        self.assertIn("private API", text)
+        self.assertIn("not yet confirmed", self.window.log_bar.view.entries()[-1][2])
+        self.assertTrue(c.tools.firmware_locked)
+        self.assertEqual(c.tools.progress, 0)
+        self.assertEqual(self.worker.mock_calls, [])
+        self.assertLessEqual(self.window.pages["tools"].widget().minimumSizeHint().width(),
+                             self.window.pages["tools"].viewport().width())
+
     def test_native_confirmation_uses_selected_language(self):
         from PySide6.QtWidgets import QMessageBox
         from hmm_gesture_studio.qt.dialogs import QtDialogs

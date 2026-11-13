@@ -15,6 +15,8 @@ from pathlib import Path
 
 import openzilo as sdk
 
+from ._ble_connection import request_ota_low_latency
+
 
 @dataclass(frozen=True)
 class VerifiedFirmware:
@@ -56,6 +58,12 @@ async def install_firmware(
     """
     def progress(sent: int, total: int) -> None:
         emit("firmware_progress", {"sent": sent, "total": total})
+
+    # The worker has stopped IMU and owns this connection exclusively. Request
+    # tuning on that same native connection, not via a second BLE client.
+    latency = request_ota_low_latency(ring)
+    if latency != "not_applicable":
+        emit("firmware_connection_latency", {"status": latency})
 
     info = await sdk.update_firmware(
         ring, verified.bundle, trusted_public_key=verified.public_key,
