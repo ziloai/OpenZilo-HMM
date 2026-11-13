@@ -69,6 +69,14 @@ Audio operations run alongside the IMU consumer and do not stop, resubscribe or 
 
 远程录音、实时 PCM、本机校准及 OTA 的具体操作见 [Studio 使用说明](../studio/README.md)。校准不会改写戒指参数或已有手势数据，不会把 g/°/s 输入原始计数模型。固件升级后原校准可能失效，需要明确重置后重新校准。可信公钥不得来自待验固件包本身；本项目不替用户建立信任锚。
 
+## macOS OTA connection tuning / macOS OTA 连接调优
+
+Before each OTA attempt, after exclusive worker preparation, Studio makes a best-effort low-latency request on the **existing** CoreBluetooth connection. The adapter in `studio/src/hmm_gesture_studio/_ble_connection.py` accesses the pinned SDK/Bleak backend and calls the private central-manager selector `setDesiredConnectionLatency:forPeripheral:` with `0`. The tested macOS runtime identifies this value as `low`; it is not an interval in milliseconds. There is no second BLE connection, delegate replacement, or change to SDK packet sizes, signature checks, or reboot/version verification.
+
+Non-macOS platforms skip the request. Missing backend support or a native exception produces a UI status/log message and leaves the original SDK upgrade path available. A returned native call means **request submitted**, not that negotiation succeeded. Studio neither invents negotiated values nor waits a fixed duration to claim success. Actual interval, peripheral latency and supervision timeout remain system-controlled; system upgrades may change this private API. The OTA attempt still ends the Studio session, and a later attempt requests tuning again. No previous parameter values are guessed/restored and no persistent device configuration is written.
+
+macOS 下，每次 OTA 获得独占连接并停止 IMU 后，Studio 会在调用 SDK 升级前自动尝试请求低延迟，用户无需另开脚本。只有 OTA 使用这个请求，普通连接不受影响；该优化与“无响应快速发送”无关，本分支未改变发送协议。界面提示“已请求、尚未确认生效”；不支持或请求异常时提示并继续原有升级流程。私有接口可能随系统或 Bleak 变化而失效，具体参数与提速幅度须实机核实。实现不抓取系统日志，不记录设备地址、序列号或固件数据。
+
 ## Verification and upgrades / 验证与后续升级
 
 Automated tests use SDK types and simulated transports. They do not prove BLE behavior, microphone/output quality or playback latency, calibration accuracy or installation on a physical ring. Before release, manually check capability discovery, fresh IMU/reconnection, remote stop, live END and disconnect handling, mono/stereo file decoding, calibration cancellation/validation, invalid signatures and OTA reboot/version verification on the intended hardware. Never flash as part of unattended software tests.
